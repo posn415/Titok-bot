@@ -22,74 +22,83 @@ def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-def get_tiktok_video(url):
-    # Link အတိုဖြစ်နေပါက Link အရှည်နှင့် Video ID ရအောင် အရင်ပြောင်းခြင်း
-    clean_url = url
-    video_id = None
-    try:
-        resp = scraper.get(url, allow_redirects=True, timeout=10)
-        clean_url = resp.url.split("?")[0]
-    except Exception:
-        pass
+def get_tiktok_video(raw_url):
+    debug_logs = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.tikwm.com/"
+    }
 
-    id_match = re.search(r'/video/(\d+)', clean_url)
-    if id_match:
-        video_id = id_match.group(1)
-
-    # နည်းလမ်း ၁ - TikWM (Cloudscraper ဖြင့် Cloudflare ကျော်ခြင်း)
-    try:
-        r1 = scraper.post(
-            "https://www.tikwm.com/api/",
-            data={"url": clean_url, "count": 12, "cursor": 0, "web": 1, "hd": 1},
-            timeout=15
-        )
-        if r1.status_code == 200:
-            data = r1.json()
-            if data.get("code") == 0 and "data" in data:
-                v_url = data["data"].get("hdplay") or data["data"].get("play")
-                if v_url:
-                    return ("https://www.tikwm.com" + v_url) if v_url.startswith("/") else v_url
-    except Exception:
-        pass
-
-    # နည်းလမ်း ၂ - TiklyDown v3 API
-    for api_ep in ["https://api.tiklydown.eu.org/api/download", "https://api.tiklydown.eu.org/api/download/v3"]:
+    # နည်းလမ်း ၁ - TikWM သို့ မူရင်း Link အတိုအတိုင်း တိုက်ရိုက်ပို့ခြင်း (Redirect မလုပ်ပါ)
+    for target_url in [raw_url]:
         try:
-            r2 = scraper.get(api_ep, params={"url": clean_url}, timeout=15)
-            if r2.status_code == 200:
+            r1 = scraper.post(
+                "https://www.tikwm.com/api/",
+                data={"url": target_url, "hd": 1},
+                headers=headers,
+                timeout=15
+            )
+            if r1.status_code == 200 and r1.text.strip().startswith("{"):
+                data = r1.json()
+                if data.get("code") == 0 and "data" in data:
+                    # အကယ်၍ ဓာတ်ပုံ Slide ပို့စ်ဖြစ်နေလျှင်
+                    if data["data"].get("images"):
+                        return None, "ဤပို့စ်သည် ဗီဒီယိုမဟုတ်ဘဲ ဓာတ်ပုံ (Slide) ပို့စ် ဖြစ်နေပါသည်။"
+                    v_url = data["data"].get("play") or data["data"].get("hdplay") or data["data"].get("wmplay")
+                    if v_url:
+                        if v_url.startswith("/"):
+                            v_url = "https://www.tikwm.com" + v_url
+                        return v_url, None
+                else:
+                    debug_logs.append(f"TikWM: {data.get('msg', 'code!=0')}")
+            else:
+                debug_logs.append(f"TikWM HTTP {r1.status_code}")
+        except Exception as e:
+            debug_logs.append(f"TikWM Err: {str(e)[:25]}")
+
+    # နည်းလမ်း ၂ - TiklyDown API (မူရင်း Link အတိုင်း ပို့ခြင်း)
+    for ep in ["https://api.tiklydown.eu.org/api/download", "https://api.tiklydown.eu.org/api/download/v3"]:
+        try:
+            r2 = requests.get(ep, params={"url": raw_url}, headers=headers, timeout=15)
+            if r2.status_code == 200 and r2.text.strip().startswith("{"):
                 data = r2.json()
                 v_url = (
                     data.get("video", {}).get("noWatermark")
                     or data.get("result", {}).get("video")
                 )
                 if v_url:
-                    return v_url
-        except Exception:
-            pass
+                    return v_url, None
+        except Exception as e:
+            debug_logs.append(f"Tikly Err: {str(e)[:20]}")
 
-    # နည်းလမ်း ၃ - TikTok Official Embed Page မှ တိုက်ရိုက်ဆွဲယူခြင်း
-    if video_id:
-        try:
-            embed_url = f"https://www.tiktok.com/embed/v2/{video_id}"
-            r3 = scraper.get(embed_url, timeout=15)
-            matches = re.findall(r'"playAddr":"([^"]+)"', r3.text)
-            if matches:
-                return matches[0].encode('utf-8').decode('unicode_escape').replace("\\/", "/")
-        except Exception:
-            pass
+    # နည်းလမ်း ၃ - Mobile Header ဖြင့် Link အရှည်ဖြည်ပြီး TikWM ထပ်စမ်းခြင်း
+    try:
+        mob_headers = {"User-Agent": "com.zhiliaoapp.musically/2023501030 (Linux; U; Android 13; en_US; Pixel 7; Build/TD1A.220804.031; Cronet/58.0.2991.0)"}
+        r_redir = requests.head(raw_url, headers=mob_headers, allow_redirects=True, timeout=10)
+        resolved_url = r_redir.url.split("?")[0]
+        if resolved_url != raw_url and "tiktok.com" in resolved_url:
+            r3 = scraper.get("https://www.tikwm.com/api/", params={"url": resolved_url}, headers=headers, timeout=15)
+            if r3.status_code == 200 and r3.text.strip().startswith("{"):
+                data = r3.json()
+                if data.get("code") == 0 and "data" in data:
+                    v_url = data["data"].get("play")
+                    if v_url:
+                        return ("https://www.tikwm.com" + v_url) if v_url.startswith("/") else v_url, None
+    except Exception as e:
+        debug_logs.append(f"Redir Err: {str(e)[:20]}")
 
-    # နည်းလမ်း ၄ - OffTikTok / TnkTok Mirror မှ ဆွဲယူခြင်း
+    # နည်းလမ်း ၄ - vxTikTok / tfxktok JSON API
     for domain in ["tfxktok.com", "vxtiktok.com"]:
         try:
-            m_url = re.sub(r'(www\.|vm\.|vt\.)?tiktok\.com', domain, clean_url)
+            m_url = re.sub(r'(www\.|vm\.|vt\.)?tiktok\.com', domain, raw_url)
             r4 = requests.get(m_url, headers={"User-Agent": "TelegramBot (like TwitterBot)"}, timeout=15)
             match = re.search(r'<meta property="og:video" content="([^"]+)"', r4.text)
             if match:
-                return match.group(1)
+                return match.group(1), None
         except Exception:
             pass
 
-    return None
+    return None, " | ".join(debug_logs)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -102,9 +111,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status_msg = await update.message.reply_text("ဒေါင်းလုဒ်ဆွဲနေပါတယ် ခဏစောင့်ပါ...")
 
     try:
-        video_url = get_tiktok_video(url)
+        video_url, err_detail = get_tiktok_video(url)
         if not video_url:
-            await status_msg.edit_text("ဗီဒီယို ဆွဲမရပါ။ (ဓာတ်ပုံ Slide ပို့စ် မဟုတ်ကြောင်း သို့မဟုတ် Private အကောင့် မဟုတ်ကြောင်း စစ်ဆေးပါ)")
+            await status_msg.edit_text(f"ဗီဒီယို ဆွဲမရပါ။\nအကြောင်းရင်း: {err_detail}")
             return
 
         try:
