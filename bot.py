@@ -5,26 +5,135 @@ import json
 import time
 import asyncio
 import threading
+import logging
 from io import BytesIO
 
+import psycopg
 from flask import Flask
 from curl_cffi import requests as c_requests
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    filters,
+    ContextTypes
+)
 
-# Render Environment မှ Bot Token ယူမည်
+# Logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
+
+logger = logging.getLogger(__name__)
+
+# Environment Variables
 TOKEN = os.getenv("BOT_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is missing in Render Environment.")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is missing in Render Environment.")
 
 RENDER_URL = "https://titok-bot.onrender.com"
 
 app = Flask(__name__)
 
 
+# =========================
+# DATABASE
+# =========================
+
+def get_db_connection():
+    return psycopg.connect(
+        DATABASE_URL,
+        connect_timeout=10
+    )
+
+
+def init_database():
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS users (
+                        telegram_id BIGINT PRIMARY KEY,
+                        username TEXT,
+                        first_name TEXT,
+                        is_banned BOOLEAN DEFAULT FALSE,
+                        joined_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS downloads (
+                        id BIGSERIAL PRIMARY KEY,
+                        telegram_id BIGINT REFERENCES users(telegram_id),
+                        video_url TEXT,
+                        downloaded_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                """)
+
+        logger.info("Database connected successfully.")
+
+    except Exception:
+        logger.exception("Database initialization failed.")
+
+
+def save_user(user):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO users (
+                        telegram_id,
+                        username,
+                        first_name
+                    )
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (telegram_id)
+                    DO UPDATE SET
+                        username = EXCLUDED.username,
+                        first_name = EXCLUDED.first_name;
+                """, (
+                    user.id,
+                    user.username,
+                    user.first_name
+                ))
+
+    except Exception:
+        logger.exception("Could not save user.")
+
+
+def save_download(telegram_id, video_url):
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO downloads (
+                        telegram_id,
+                        video_url
+                    )
+                    VALUES (%s, %s);
+                """, (
+                    telegram_id,
+                    video_url
+                ))
+
+    except Exception:
+        logger.exception("Could not save download history.")
+
+
+# =========================
+# FLASK SERVER
+# =========================
+
 @app.route("/")
 def home():
-    return "Bot is alive 24/7!"
+    return "Bot is alive!"
 
 
 def run_flask():
@@ -35,11 +144,16 @@ def run_flask():
 def keep_alive_ping():
     while True:
         time.sleep(600)
+
         try:
             c_requests.get(RENDER_URL, timeout=10)
         except Exception:
             pass
 
+
+# =========================
+# TIKTOK DOWNLOADER
+# =========================
 
 def fetch_video_bytes(raw_url):
     debug_logs = []
@@ -62,7 +176,10 @@ def fetch_video_bytes(raw_url):
                 if data["data"].get("images"):
                     return None, None, "ဤပို့စ်သည် ဓာတ်ပုံ (Slide) ပို့စ် ဖြစ်နေပါသည်။"
 
-                video_path = data["data"].get("play") or data["data"].get("hdplay")
+                video_path = (
+                    data["data"].get("play")
+                    or data["data"].get("hdplay")
+                )
 
                 if video_path:
                     video_url = (
@@ -114,6 +231,7 @@ def fetch_video_bytes(raw_url):
             if debug_logs
             else "ဗီဒီယို လင့်ခ် ရှာမတွေ့ပါ။"
         )
+
         return None, None, detail
 
     # Download video
@@ -136,12 +254,21 @@ def fetch_video_bytes(raw_url):
     return None, video_url, None
 
 
+# =========================
+# TELEGRAM MESSAGE HANDLER
+# =========================
+
 async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
     if not update.message or not update.message.text:
         return
+
+    user = update.effective_user
+
+    if user:
+        await asyncio.to_thread(save_user, user)
 
     message_text = update.message.text.strip()
 
@@ -181,6 +308,13 @@ async def handle_message(
                 caption="Watermark မပါသော ဗီဒီယို ရပါပြီ ✨"
             )
 
+            if user and video_url:
+                await asyncio.to_thread(
+                    save_download,
+                    user.id,
+                    url
+                )
+
             await status_msg.delete()
 
         elif video_url:
@@ -188,6 +322,13 @@ async def handle_message(
                 video=video_url,
                 caption="Watermark မပါသော ဗီဒီယို ရပါပြီ ✨"
             )
+
+            if user:
+                await asyncio.to_thread(
+                    save_download,
+                    user.id,
+                    url
+                )
 
             await status_msg.delete()
 
@@ -197,12 +338,20 @@ async def handle_message(
             )
 
     except Exception as exc:
+        logger.exception("Message handling failed.")
+
         await status_msg.edit_text(
             f"အမှားတစ်ခု ဖြစ်ပေါ်နေပါသည်: {exc}"
         )
 
 
+# =========================
+# START BOT
+# =========================
+
 if __name__ == "__main__":
+
+    init_database()
 
     threading.Thread(
         target=run_flask,
@@ -223,5 +372,7 @@ if __name__ == "__main__":
         )
     )
 
+    logger.info("Bot is starting...")
+
     bot_app.run_polling(drop_pending_updates=True)
-        
+    
