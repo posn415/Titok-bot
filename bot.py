@@ -1,84 +1,47 @@
 import os
-import asyncio
-from threading import Thread
+import threading
+import requests
 from flask import Flask
-import yt_dlp
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# Server ၏ Environment Variable မှ Token ကို ဖတ်ယူခြင်း
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+# အောက်က YOUR_BOT_TOKEN နေရာမှာ သင့် Token ကို ထည့်ပါ
+TOKEN = os.environ.get("BOT_TOKEN", "9248832412:AAH00JDG8JA_wLFCNRQwEQZOOUQJnQZQleE")
 
-# Render တွင် 24/7 run နိုင်ရန် Flask Web Server တည်ဆောက်ခြင်း
-web_app = Flask(__name__)
+app = Flask(__name__)
 
-@web_app.route('/')
+@app.route('/')
 def home():
-    return "Bot is alive and running!"
+    return "Bot is alive!"
 
-def run_web():
+def run_flask():
     port = int(os.environ.get("PORT", 8080))
-    web_app.run(host="0.0.0.0", port=port)
-
-def keep_alive():
-    t = Thread(target=run_web)
-    t.daemon = True
-    t.start()
-
-def download_tiktok_video(url: str, output_path: str) -> str:
-    ydl_opts = {
-        'outtmpl': output_path,
-        'format': 'best[ext=mp4]/best',
-        'quiet': True,
-        'no_warnings': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-    return output_path
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "မင်္ဂလာပါ! TikTok video link ပို့ပေးပါ။ Logo မပါတဲ့ video ပြန်ပို့ပေးပါမယ်။"
-    )
+    app.run(host="0.0.0.0", port=port)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
-
+    url = update.message.text
     if "tiktok.com" not in url:
-        await update.message.reply_text("ကျေးဇူးပြု၍ မှန်ကန်သော TikTok link ပို့ပေးပါ။")
+        await update.message.reply_text("TikTok link ပို့ပေးပါ။")
         return
 
-    status_msg = await update.message.reply_text("Video ဒေါင်းလုဒ်ဆွဲနေပါသည်၊ ခဏစောင့်ပါ...")
-    file_path = f"tiktok_{update.message.chat_id}_{update.message.message_id}.mp4"
+    status_msg = await update.message.reply_text("ဒေါင်းလုဒ်ဆွဲနေပါတယ် ခဏစောင့်ပါ...")
 
     try:
-        await asyncio.to_thread(download_tiktok_video, url, file_path)
+        api_url = "https://www.tikwm.com/api/"
+        response = requests.post(api_url, data={"url": url}).json()
 
-        with open(file_path, 'rb') as video_file:
-            await update.message.reply_video(
-                video=video_file,
-                caption="Watermark မပါသော Video ရပါပြီ။"
-            )
-        await status_msg.delete()
-
+        if response.get("code") == 0:
+            video_url = response["data"]["play"]
+            await update.message.reply_video(video=video_url, caption="Watermark မပါသော ဗီဒီယို ရပါပြီ ✨")
+            await status_msg.delete()
+        else:
+            await status_msg.edit_text("ဗီဒီယို ဆွဲမရပါ။ Link မှန်မမှန် ပြန်စစ်ပေးပါ။")
     except Exception as e:
-        await status_msg.edit_text("Video ဒေါင်းလုဒ်ဆွဲရာတွင် အမှားအယွင်းရှိနေပါသည်။")
-        print(f"Error: {e}")
+        await status_msg.edit_text(f"အမှားတစ်ခု ဖြစ်ပေါ်နေပါသည်: {e}")
 
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
-
-def main():
-    keep_alive()
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("Bot စတင် အလုပ်လုပ်နေပါပြီ...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
-  
+if __name__ == '__main__':
+    threading.Thread(target=run_flask, daemon=True).start()
+    bot_app = ApplicationBuilder().token(TOKEN).build()
+    bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    bot_app.run_polling(drop_pending_updates=True)
+    
