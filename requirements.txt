@@ -1,4 +1,4 @@
 python-telegram-bot
 flask
 requests
-cloudscraper
+curl_cffi
