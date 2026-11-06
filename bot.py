@@ -5,8 +5,8 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
-# အောက်က YOUR_BOT_TOKEN နေရာမှာ သင့် Token ကို ထည့်ပါ
-TOKEN = os.environ.get("BOT_TOKEN", "9248832412:AAH00JDG8JA_wLFCNRQwEQZOOUQJnQZQleE")
+# အောက်က မျက်တောင်နှစ်ခုကြားမှာ သင့် Token ကို ထည့်ပါ
+TOKEN = "9248832412:AAH00JDG8JA_wLFCNRQwEQZOOUQJnQZQleE"
 
 app = Flask(__name__)
 
