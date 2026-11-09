@@ -305,55 +305,196 @@ def get_tiktok_data(url):
         for image in images:
             found_urls = []
 
-            def collect_urls(node):
-                if isinstance(node, dict):
-                    for key, value in node.items():
-                        if key in ("urlList", "url_list"):
-                            if isinstance(value, list):
-                                found_urls.extend(
-                                    x for x in value
-                                    if isinstance(x, str)
-                                    and x.startswith("http")
-                                )
-                        else:
-                            collect_urls(value)
+def get_tiktok_data(url):
+    session = c_requests.Session(impersonate="chrome120")
 
-                elif isinstance(node, list):
-                    for value in node:
-                        collect_urls(value)
+    # 1. TikWM API ကို အရင်စမ်းမယ်
+    try:
+        response = session.post(
+            "https://www.tikwm.com/api/",
+            data={"url": url, "hd": 1},
+            headers={"Referer": "https://www.tikwm.com/"},
+            timeout=25
+        )
+        response.raise_for_status()
+        payload = response.json()
 
-                elif isinstance(node, str) and node.startswith("http"):
-                    found_urls.append(node)
+        if payload.get("code") == 0 and payload.get("data"):
+            return payload["data"], session
 
-            collect_urls(image)
+        log.warning("TikWM response: %s", str(payload)[:300])
 
-            if found_urls:
+    except Exception as exc:
+        log.warning("TikWM API failed: %s", str(exc)[:200])
+
+    # 2. TikTok Page ကို Browser ပုံစံနဲ့ ဖတ်မယ်
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 10; K) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Mobile Safari/537.36"
+            ),
+            "Referer": "https://www.tiktok.com/",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        response = session.get(
+            url,
+            headers=headers,
+            allow_redirects=True,
+            timeout=30
+        )
+        response.raise_for_status()
+        html = response.text
+
+        # Post ID ရှာမယ်
+        post_match = re.search(r"/(?:photo|video)/(\d+)", response.url)
+        if not post_match:
+            post_match = re.search(r"/(?:photo|video)/(\d+)", url)
+
+        post_id = post_match.group(1) if post_match else None
+
+        # TikTok မှာ အသုံးပြုတဲ့ JSON script မျိုးစုံကို စစ်မယ်
+        script_ids = [
+            "__UNIVERSAL_DATA_FOR_REHYDRATION__",
+            "SIGI_STATE",
+            "__NEXT_DATA__",
+        ]
+
+        page_objects = []
+
+        for script_id in script_ids:
+            pattern = (
+                r'<script[^>]*id=["\']'
+                + re.escape(script_id)
+                + r'["\'][^>]*>(.*?)</script>'
+            )
+            matches = re.findall(pattern, html, re.S | re.I)
+
+            for raw in matches:
+                try:
+                    page_objects.append(json.loads(raw))
+                except Exception:
+                    continue
+
+        if not page_objects:
+            raise ValueError("TikTok Page JSON Data မတွေ့ပါ။")
+
+        # JSON အတွင်းရှိ သက်ဆိုင်ရာ Post ကို ရှာမယ်
+        candidates = []
+
+        def scan(node):
+            if isinstance(node, dict):
+                node_id = str(
+                    node.get("id")
+                    or node.get("itemId")
+                    or node.get("aweme_id")
+                    or ""
+                )
+
+                if (
+                    "imagePost" in node
+                    or "itemStruct" in node
+                    or "video" in node
+                ):
+                    candidates.append((node_id, node))
+
+                for value in node.values():
+                    scan(value)
+
+            elif isinstance(node, list):
+                for value in node:
+                    scan(value)
+
+        for obj in page_objects:
+            scan(obj)
+
+        selected = None
+
+        if post_id:
+            for node_id, node in candidates:
+                if node_id == post_id:
+                    selected = node
+                    break
+
+        if not selected:
+            for node_id, node in candidates:
+                if "imagePost" in node:
+                    selected = node
+                    break
+
+        if not selected and candidates:
+            selected = candidates[0][1]
+
+        if not selected:
+            raise ValueError("TikTok Post Data မတွေ့ပါ။")
+
+        # itemStruct အတွင်းရှိ Data ကို ထပ်စစ်မယ်
+        item = selected.get("itemStruct") or selected
+        image_post = item.get("imagePost") or selected.get("imagePost") or {}
+        images = image_post.get("images") or []
+
+        photo_urls = []
+
+        def collect_urls(node, found):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in ("urlList", "url_list"):
+                        if isinstance(value, list):
+                            found.extend(
+                                x for x in value
+                                if isinstance(x, str)
+                                and x.startswith("http")
+                            )
+                    else:
+                        collect_urls(value, found)
+
+            elif isinstance(node, list):
+                for value in node:
+                    collect_urls(value, found)
+
+        for image in images:
+            found_urls = []
+            collect_urls(image, found_urls)
+
+            unique_urls = list(dict.fromkeys(found_urls))
+
+            if unique_urls:
                 photo_urls.append({
                     "display_image": {
-                        "url_list": list(dict.fromkeys(found_urls))
+                        "url_list": unique_urls
                     }
                 })
 
         if photo_urls:
             return {"images": photo_urls}, session
 
-        video = item.get("video") or {}
+        # Video Post ဖြစ်နေရင် Video Data ပြန်ပေးမယ်
+        video = item.get("video") or selected.get("video") or {}
+
         video_url = (
             video.get("playAddr")
             or video.get("downloadAddr")
+            or video.get("play_addr")
         )
+
+        if isinstance(video_url, dict):
+            video_url = (
+                video_url.get("url_list") or [None]
+            )[0]
 
         if video_url:
             return {"play": video_url}, session
 
-        raise ValueError(
-            "Photo နှင့် Video Link နှစ်မျိုးလုံး မတွေ့ပါ။"
-        )
+        raise ValueError("Photo URL နှင့် Video URL မတွေ့ပါ။")
 
     except Exception as exc:
         raise RuntimeError(
-            f"TikWM API နှင့် TikTok Fallback နှစ်ခုလုံး မအောင်မြင်ပါ: {str(exc)[:300]}"
+            "TikWM API နှင့် TikTok Fallback နှစ်ခုလုံး "
+            f"မအောင်မြင်ပါ: {str(exc)[:300]}"
         )
+
 
 
 def choose_video_url(data, quality):
