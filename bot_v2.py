@@ -232,7 +232,7 @@ def check_rate_limit(uid):
 # ---------------------------------------------------------------------
 
 
-def get_tiktok_data(url):
+
 def get_tiktok_data(url):
     session = c_requests.Session(impersonate="chrome120")
 
