@@ -1,4 +1,4 @@
-import os
+def os
 import re
 import json
 import time
@@ -253,7 +253,11 @@ def get_tiktok_data(url):
         log.warning("TikWM API failed: %s", str(exc)[:200])
 
     try:
-        response = session.get(url, allow_redirects=True, timeout=25)
+        response = session.get(
+            url,
+            allow_redirects=True,
+            timeout=25
+        )
         response.raise_for_status()
 
         match = re.search(
@@ -261,22 +265,57 @@ def get_tiktok_data(url):
             response.text
         )
 
-        if match:
-            page_data = json.loads(match.group(1))
-            item = (
-                page_data.get("__DEFAULT_SCOPE__", {})
-                .get("webapp.video-detail", {})
-                .get("itemInfo", {})
-                .get("itemStruct", {})
+        if not match:
+            raise ValueError("TikTok data မတွေ့ပါ။")
+
+        page_data = json.loads(match.group(1))
+
+        item = (
+            page_data.get("__DEFAULT_SCOPE__", {})
+            .get("webapp.video-detail", {})
+            .get("itemInfo", {})
+            .get("itemStruct", {})
+        )
+
+        image_post = item.get("imagePost") or {}
+        images = image_post.get("images") or []
+
+        photo_urls = []
+
+        for image in images:
+            image_url = (
+                image.get("imageURL")
+                or image.get("displayImage")
+                or image.get("display_image")
+                or {}
             )
 
-            video = item.get("video", {})
-            video_url = video.get("playAddr") or video.get("downloadAddr")
+            url_list = (
+                image_url.get("urlList")
+                or image_url.get("url_list")
+                or []
+            )
 
-            if video_url:
-                return {"play": video_url}, session
+            if url_list:
+                photo_urls.append({
+                    "display_image": {
+                        "url_list": url_list
+                    }
+                })
 
-        raise ValueError("TikTok Page မှ Video Link မတွေ့ပါ။")
+        if photo_urls:
+            return {"images": photo_urls}, session
+
+        video = item.get("video", {})
+        video_url = (
+            video.get("playAddr")
+            or video.get("downloadAddr")
+        )
+
+        if video_url:
+            return {"play": video_url}, session
+
+        raise ValueError("Photo နှင့် Video Link နှစ်မျိုးလုံး မတွေ့ပါ။")
 
     except Exception as exc:
         raise RuntimeError(
