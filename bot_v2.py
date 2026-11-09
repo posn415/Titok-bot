@@ -232,8 +232,10 @@ def check_rate_limit(uid):
 # ---------------------------------------------------------------------
 
 def get_tiktok_data(url):
-    response = c_requests.get(
-        API_URL, params={"url": url, "hd": 1}, impersonate="chrome",
+    response = c_requests.post(
+        API_URL,
+        data={"url": url, "hd": 1},
+        impersonate="chrome",
         timeout=35
     )
     response.raise_for_status()
