@@ -238,10 +238,19 @@ def get_tiktok_data(url):
         impersonate="chrome",
         timeout=35
     )
-    response.raise_for_status()
+
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"API HTTP {response.status_code}: {response.text[:500]}"
+        )
+
     payload = response.json()
+
     if payload.get("code") != 0 or not payload.get("data"):
-        raise ValueError(payload.get("msg") or "TikTok API က data မပေးနိုင်ပါ။")
+        raise ValueError(
+            payload.get("msg") or "TikTok API က data မပေးနိုင်ပါ။"
+        )
+
     return payload["data"]
 
 def choose_video_url(data, quality):
