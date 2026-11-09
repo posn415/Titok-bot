@@ -589,7 +589,7 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                     await context.bot.send_media_group(chat_id=chat_id, media=group)
                 media_type = "photo"
             else:
-                                video_url = choose_video_url(data, quality)
+                video_url = choose_video_url(data, quality)
 
                 if kind == "mp3":
                     video_bytes = await asyncio.to_thread(fetch_bytes, video_url)
