@@ -37,7 +37,7 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "8556272994"))
 RENDER_URL = os.getenv("RENDER_URL", "").strip().rstrip("/")
 MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "45"))
 CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "P_digital3").lstrip("@")
-API_URL = "https://www.tikwm.com/api/"
+API_URL = "https://tikwm.com/api/"
 RATE_LIMITS = {"minute": 3, "hour": 20, "day": 100}
 QUALITY_OPTIONS = ("720p", "1080p", "original")
 
