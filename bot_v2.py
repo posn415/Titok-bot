@@ -249,6 +249,8 @@ def get_tiktok_data(url):
         if payload.get("code") == 0 and payload.get("data"):
             return payload["data"], session
 
+        log.warning("TikWM response: %s", str(payload)[:300])
+
     except Exception as exc:
         log.warning("TikWM API failed: %s", str(exc)[:200])
 
@@ -266,16 +268,34 @@ def get_tiktok_data(url):
         )
 
         if not match:
-            raise ValueError("TikTok data မတွေ့ပါ။")
+            raise ValueError("TikTok Page Data မတွေ့ပါ။")
 
         page_data = json.loads(match.group(1))
 
-        item = (
-            page_data.get("__DEFAULT_SCOPE__", {})
-            .get("webapp.video-detail", {})
-            .get("itemInfo", {})
-            .get("itemStruct", {})
-        )
+        def find_key(node, target):
+            if isinstance(node, dict):
+                if target in node:
+                    return node
+                for value in node.values():
+                    found = find_key(value, target)
+                    if found:
+                        return found
+
+            elif isinstance(node, list):
+                for value in node:
+                    found = find_key(value, target)
+                    if found:
+                        return found
+
+            return None
+
+        item = find_key(page_data, "imagePost")
+
+        if not item:
+            item = find_key(page_data, "video")
+
+        if not item:
+            raise ValueError("TikTok Item Data မတွေ့ပါ။")
 
         image_post = item.get("imagePost") or {}
         images = image_post.get("images") or []
@@ -283,30 +303,41 @@ def get_tiktok_data(url):
         photo_urls = []
 
         for image in images:
-            image_url = (
-                image.get("imageURL")
-                or image.get("displayImage")
-                or image.get("display_image")
-                or {}
-            )
+            found_urls = []
 
-            url_list = (
-                image_url.get("urlList")
-                or image_url.get("url_list")
-                or []
-            )
+            def collect_urls(node):
+                if isinstance(node, dict):
+                    for key, value in node.items():
+                        if key in ("urlList", "url_list"):
+                            if isinstance(value, list):
+                                found_urls.extend(
+                                    x for x in value
+                                    if isinstance(x, str)
+                                    and x.startswith("http")
+                                )
+                        else:
+                            collect_urls(value)
 
-            if url_list:
+                elif isinstance(node, list):
+                    for value in node:
+                        collect_urls(value)
+
+                elif isinstance(node, str) and node.startswith("http"):
+                    found_urls.append(node)
+
+            collect_urls(image)
+
+            if found_urls:
                 photo_urls.append({
                     "display_image": {
-                        "url_list": url_list
+                        "url_list": list(dict.fromkeys(found_urls))
                     }
                 })
 
         if photo_urls:
             return {"images": photo_urls}, session
 
-        video = item.get("video", {})
+        video = item.get("video") or {}
         video_url = (
             video.get("playAddr")
             or video.get("downloadAddr")
@@ -315,7 +346,9 @@ def get_tiktok_data(url):
         if video_url:
             return {"play": video_url}, session
 
-        raise ValueError("Photo နှင့် Video Link နှစ်မျိုးလုံး မတွေ့ပါ။")
+        raise ValueError(
+            "Photo နှင့် Video Link နှစ်မျိုးလုံး မတွေ့ပါ။"
+        )
 
     except Exception as exc:
         raise RuntimeError(
