@@ -229,81 +229,8 @@ def check_rate_limit(uid):
 
 # ---------------------------------------------------------------------
 # TikTok API / media helpers
-# ---------------------------------------------------------------------
+# ---------------------------------------------------------------------def
 
-
-
-def get_tiktok_data(url):
-    session = c_requests.Session(impersonate="chrome120")
-
-    try:
-        response = session.post(
-            "https://www.tikwm.com/api/",
-            data={"url": url, "hd": 1},
-            headers={"Referer": "https://www.tikwm.com/"},
-            timeout=20
-        )
-        response.raise_for_status()
-        payload = response.json()
-
-        if payload.get("code") == 0 and payload.get("data"):
-            return payload["data"], session
-
-        log.warning("TikWM response: %s", str(payload)[:300])
-
-    except Exception as exc:
-        log.warning("TikWM API failed: %s", str(exc)[:200])
-
-    try:
-        response = session.get(
-            url,
-            allow_redirects=True,
-            timeout=25
-        )
-        response.raise_for_status()
-
-        match = re.search(
-            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
-            response.text
-        )
-
-        if not match:
-            raise ValueError("TikTok Page Data မတွေ့ပါ။")
-
-        page_data = json.loads(match.group(1))
-
-        def find_key(node, target):
-            if isinstance(node, dict):
-                if target in node:
-                    return node
-                for value in node.values():
-                    found = find_key(value, target)
-                    if found:
-                        return found
-
-            elif isinstance(node, list):
-                for value in node:
-                    found = find_key(value, target)
-                    if found:
-                        return found
-
-            return None
-
-        item = find_key(page_data, "imagePost")
-
-        if not item:
-            item = find_key(page_data, "video")
-
-        if not item:
-            raise ValueError("TikTok Item Data မတွေ့ပါ။")
-
-        image_post = item.get("imagePost") or {}
-        images = image_post.get("images") or []
-
-        photo_urls = []
-
-        for image in images:
-            found_urls = []
 
 def get_tiktok_data(url):
     session = c_requests.Session(impersonate="chrome120")
