@@ -302,11 +302,21 @@ def choose_video_url(data, quality):
     return data.get("play") or candidates[0]
 
 def fetch_bytes(url):
-    response = c_requests.get(url, impersonate="chrome", timeout=90)
+    session = c_requests.Session(impersonate="chrome120")
+    response = session.get(
+        url,
+        headers={"Referer": "https://www.tiktok.com/"},
+        timeout=90
+    )
     response.raise_for_status()
+
     data = response.content
+
     if len(data) > MAX_FILE_MB * 1024 * 1024:
-        raise ValueError(f"ဖိုင်အရွယ်အစား {MAX_FILE_MB}MB ထက်ကျော်နေပါတယ်။")
+        raise ValueError(
+            f"ဖိုင်အရွယ်အစား {MAX_FILE_MB}MB ထက်ကျော်နေပါတယ်။"
+        )
+
     return data
 
 def get_photo_urls(data):
