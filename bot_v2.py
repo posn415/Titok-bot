@@ -590,17 +590,40 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                 media_type = "photo"
             else:
                 video_url = choose_video_url(data, quality)
-                video_bytes = await asyncio.to_thread(fetch_bytes, video_url)
-                if kind == "mp3":
-                    audio = await asyncio.to_thread(extract_mp3, video_bytes)
-                    await context.bot.send_audio(chat_id=chat_id, audio=BytesIO(audio),
-                                                 filename="tiktok_audio.mp3")
-                    media_type = "mp3"
-                else:
-                    await context.bot.send_video(chat_id=chat_id, video=BytesIO(video_bytes),
-                                                 supports_streaming=True,
-                                                 read_timeout=120, write_timeout=120)
-                    media_type = "video"
+
+if kind == "mp3":
+    video_bytes = await asyncio.to_thread(fetch_bytes, video_url)
+    audio = await asyncio.to_thread(extract_mp3, video_bytes)
+    await context.bot.send_audio(
+        chat_id=chat_id,
+        audio=BytesIO(audio),
+        filename="tiktok_audio.mp3"
+    )
+    media_type = "mp3"
+else:
+    try:
+        video_bytes = await asyncio.to_thread(fetch_bytes, video_url)
+        await context.bot.send_video(
+            chat_id=chat_id,
+            video=BytesIO(video_bytes),
+            supports_streaming=True,
+            read_timeout=120,
+            write_timeout=120
+        )
+    except Exception as download_error:
+        log.warning(
+            "Direct download failed, trying Telegram URL: %s",
+            str(download_error)[:200]
+        )
+        await context.bot.send_video(
+            chat_id=chat_id,
+            video=video_url,
+            supports_streaming=True,
+            read_timeout=120,
+            write_timeout=120
+        )
+
+    media_type = "video"
             with db() as conn:
                 conn.execute("""
                     INSERT INTO downloads(user_id,username,video_url,status,media_type,quality)
