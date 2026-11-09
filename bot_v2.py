@@ -231,27 +231,62 @@ def check_rate_limit(uid):
 # TikTok API / media helpers
 # ---------------------------------------------------------------------
 
+
 def get_tiktok_data(url):
-    response = c_requests.post(
-        API_URL,
-        data={"url": url, "hd": 1},
-        impersonate="chrome",
-        timeout=35
-    )
+    session = c_requests.Session(impersonate="chrome120")
 
-    if response.status_code != 200:
+    # First try TikWM API, same method as the old working bot.
+    try:
+        response = session.post(
+            "https://www.tikwm.com/api/",
+            data={"url": url, "hd": 1},
+            headers={"Referer": "https://www.tikwm.com/"},
+            timeout=20
+        )
+
+        if response.status_code == 200:
+            payload = response.json()
+            if payload.get("code") == 0 and payload.get("data"):
+                return payload["data"]
+    except Exception as exc:
+        log.warning("TikWM API failed: %s", str(exc)[:200])
+
+    # Fallback: read the TikTok page directly.
+    try:
+        response = session.get(
+            url,
+            allow_redirects=True,
+            timeout=25
+        )
+        response.raise_for_status()
+
+        match = re.search(
+            r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+            response.text
+        )
+
+        if match:
+            page_data = json.loads(match.group(1))
+            item = (
+                page_data.get("__DEFAULT_SCOPE__", {})
+                .get("webapp.video-detail", {})
+                .get("itemInfo", {})
+                .get("itemStruct", {})
+            )
+
+            video = item.get("video", {})
+            video_url = video.get("playAddr") or video.get("downloadAddr")
+
+            if video_url:
+                return {"play": video_url}
+
+        raise ValueError("TikTok Page မှ Video Link မတွေ့ပါ။")
+
+    except Exception as exc:
         raise RuntimeError(
-            f"API HTTP {response.status_code}: {response.text[:500]}"
+            f"TikWM API နှင့် TikTok Fallback နှစ်ခုလုံး မအောင်မြင်ပါ: {str(exc)[:300]}"
         )
 
-    payload = response.json()
-
-    if payload.get("code") != 0 or not payload.get("data"):
-        raise ValueError(
-            payload.get("msg") or "TikTok API က data မပေးနိုင်ပါ။"
-        )
-
-    return payload["data"]
 
 def choose_video_url(data, quality):
     candidates = []
