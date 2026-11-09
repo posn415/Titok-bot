@@ -1,4 +1,4 @@
-import os
+def
 import re
 import json
 import time
@@ -233,9 +233,9 @@ def check_rate_limit(uid):
 
 
 def get_tiktok_data(url):
+def get_tiktok_data(url):
     session = c_requests.Session(impersonate="chrome120")
 
-    # First try TikWM API, same method as the old working bot.
     try:
         response = session.post(
             "https://www.tikwm.com/api/",
@@ -243,21 +243,17 @@ def get_tiktok_data(url):
             headers={"Referer": "https://www.tikwm.com/"},
             timeout=20
         )
+        response.raise_for_status()
+        payload = response.json()
 
-        if response.status_code == 200:
-            payload = response.json()
-            if payload.get("code") == 0 and payload.get("data"):
-                return payload["data"]
+        if payload.get("code") == 0 and payload.get("data"):
+            return payload["data"], session
+
     except Exception as exc:
         log.warning("TikWM API failed: %s", str(exc)[:200])
 
-    # Fallback: read the TikTok page directly.
     try:
-        response = session.get(
-            url,
-            allow_redirects=True,
-            timeout=25
-        )
+        response = session.get(url, allow_redirects=True, timeout=25)
         response.raise_for_status()
 
         match = re.search(
@@ -278,7 +274,7 @@ def get_tiktok_data(url):
             video_url = video.get("playAddr") or video.get("downloadAddr")
 
             if video_url:
-                return {"play": video_url}
+                return {"play": video_url}, session
 
         raise ValueError("TikTok Page မှ Video Link မတွေ့ပါ။")
 
@@ -294,22 +290,33 @@ def choose_video_url(data, quality):
         value = data.get(key)
         if value and isinstance(value, str):
             candidates.append(value)
+
     if not candidates:
         raise ValueError("Video download link မတွေ့ပါ။")
-    # TikWM's hdplay is preferred for 1080p/original when supplied.
+
     if quality in ("1080p", "original") and data.get("hdplay"):
         return data["hdplay"]
+
     return data.get("play") or candidates[0]
 
-def fetch_bytes(url):
-    session = c_requests.Session(impersonate="chrome120")
-    response = session.get(
-        url,
-        headers={"Referer": "https://www.tiktok.com/"},
-        timeout=90
-    )
-    response.raise_for_status()
 
+def fetch_bytes(session, url):
+    headers = {
+        "Referer": "https://www.tikwm.com/",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    response = session.get(url, headers=headers, timeout=90)
+
+    if response.status_code == 403:
+        response = session.get(
+            url,
+            headers={**headers, "Referer": "https://www.tiktok.com/"},
+            timeout=90
+        )
+
+    response.raise_for_status()
     data = response.content
 
     if len(data) > MAX_FILE_MB * 1024 * 1024:
@@ -573,14 +580,14 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
         return
     async with lock:
         try:
-            data = await asyncio.to_thread(get_tiktok_data, url)
+            data, media_session = await asyncio.to_thread(get_tiktok_data, url)
             photos = get_photo_urls(data)
             if photos:
                 if kind == "mp3":
                     raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
                 media = []
                 for photo_url in photos:
-                    photo = await asyncio.to_thread(fetch_bytes, photo_url)
+                    photo = await asyncio.to_thread(fetch_bytes, media_session, photo_url)
                     media.append(photo)
                 # Telegram accepts up to 10 media items per group.
                 for offset in range(0, len(media), 10):
@@ -592,7 +599,7 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                 video_url = choose_video_url(data, quality)
 
                 if kind == "mp3":
-                    video_bytes = await asyncio.to_thread(fetch_bytes, video_url)
+                    video_bytes = await asyncio.to_thread(fetch_bytes, media_session, video_url)
                     audio = await asyncio.to_thread(extract_mp3, video_bytes)
                     await context.bot.send_audio(
                         chat_id=chat_id,
@@ -602,7 +609,7 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                     media_type = "mp3"
                 else:
                     try:
-                        video_bytes = await asyncio.to_thread(fetch_bytes, video_url)
+                        video_bytes = await asyncio.to_thread(fetch_bytes, media_session, video_url)
                         await context.bot.send_video(
                             chat_id=chat_id,
                             video=BytesIO(video_bytes),
@@ -663,7 +670,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
         return
     try:
-        data = await asyncio.to_thread(get_tiktok_data, url)
+        data, _media_session = await asyncio.to_thread(get_tiktok_data, url)
         if get_photo_urls(data):
             context.user_data["pending_url"] = url
             context.user_data["pending_quality"] = "original"
