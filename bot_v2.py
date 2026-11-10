@@ -864,9 +864,13 @@ async def admin_callback(q, context):
         await q.edit_message_text(text or "Buttons မရှိသေးပါ။", reply_markup=admin_keyboard())
     elif action == "adm_ads":
         with db() as conn:
-            rows = conn.execute("SELECT id,placement,text,enabled FROM bot_ads ORDER BY id DESC").fetchall()
+            rows = conn.execute(
+                "SELECT id,placement,text,enabled,media_file_id,media_group_id "
+                "FROM bot_ads ORDER BY id DESC"
+            ).fetchall()
         text = "📣 Ads\n" + "\n".join(
-            f"{r['id']} [{r['placement']}] {'ON' if r['enabled'] else 'OFF'}: {r['text'][:80]}"
+            f"{r['id']} [{r['placement']}] {'PHOTO' if r['media_file_id'] else 'TEXT'} "
+            f"{'ON' if r['enabled'] else 'OFF'}: {(r['text'] or '')[:65]}"
             for r in rows
         )
         text += "\n\nစာသား Ad: /addad welcome စာသား\n"
@@ -1399,7 +1403,16 @@ async def togglead_cmd(update, context):
     try: aid = int(context.args[0])
     except ValueError: await update.message.reply_text("ID မမှန်ပါ။"); return
     with db() as conn:
-        conn.execute("UPDATE bot_ads SET enabled=NOT enabled WHERE id=%s", (aid,))
+        row = conn.execute(
+            "SELECT media_group_id FROM bot_ads WHERE id=%s", (aid,)
+        ).fetchone()
+        if row and row["media_group_id"]:
+            conn.execute(
+                "UPDATE bot_ads SET enabled=NOT enabled WHERE media_group_id=%s",
+                (row["media_group_id"],)
+            )
+        elif row:
+            conn.execute("UPDATE bot_ads SET enabled=NOT enabled WHERE id=%s", (aid,))
     log_admin("togglead", str(aid))
     await update.message.reply_text("Ad အခြေအနေ ပြောင်းပြီးပါပြီ။")
 
@@ -1408,7 +1421,17 @@ async def delad_cmd(update, context):
     if not context.args: await update.message.reply_text("အသုံးပြုရန်: /delad ID"); return
     try: aid = int(context.args[0])
     except ValueError: await update.message.reply_text("ID မမှန်ပါ။"); return
-    with db() as conn: conn.execute("DELETE FROM bot_ads WHERE id=%s", (aid,))
+    with db() as conn:
+        row = conn.execute(
+            "SELECT media_group_id FROM bot_ads WHERE id=%s", (aid,)
+        ).fetchone()
+        if row and row["media_group_id"]:
+            conn.execute(
+                "DELETE FROM bot_ads WHERE media_group_id=%s",
+                (row["media_group_id"],)
+            )
+        elif row:
+            conn.execute("DELETE FROM bot_ads WHERE id=%s", (aid,))
     log_admin("delad", str(aid))
     await update.message.reply_text("Ad ဖျက်ပြီးပါပြီ။")
 
