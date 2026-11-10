@@ -14,6 +14,7 @@ import psycopg
 from psycopg.rows import dict_row
 from flask import Flask, jsonify
 from curl_cffi import requests as c_requests
+from telegram.error import BadRequest
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 )
@@ -1152,6 +1153,11 @@ async def admin_command(update, context):
     await update.message.reply_text("Admin Panel", reply_markup=admin_keyboard())
 
 async def error_handler(update, context):
+    # Telegram raises this harmless error when an edit repeats identical text/markup.
+    if isinstance(context.error, BadRequest) and "message is not modified" in str(context.error).lower():
+        log.info("Ignored harmless Telegram edit: message is not modified")
+        return
+
     log.exception("Unhandled bot error", exc_info=context.error)
     try:
         with db() as conn:
