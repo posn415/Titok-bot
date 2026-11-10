@@ -113,9 +113,13 @@ def init_db():
                 placement TEXT NOT NULL DEFAULT 'after_download',
                 text TEXT NOT NULL,
                 enabled BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMPTZ DEFAULT NOW()
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                media_file_id TEXT,
+                media_group_id TEXT
             )
         """)
+        conn.execute("ALTER TABLE bot_ads ADD COLUMN IF NOT EXISTS media_file_id TEXT")
+        conn.execute("ALTER TABLE bot_ads ADD COLUMN IF NOT EXISTS media_group_id TEXT")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS force_join_channels (
                 id BIGSERIAL PRIMARY KEY,
@@ -674,16 +678,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome, reply_markup=await main_keyboard())
     await send_ads(update.effective_chat.id, "welcome", context)
     if is_admin(user.id):
-        await update.message.reply_text("Admin Panel", reply_markup=admin_keyboard())
+        await update.message.reply_text("MediaX Admin Dashboard", reply_markup=admin_keyboard())
 
 async def send_ads(chat_id, placement, context):
     with db() as conn:
         rows = conn.execute(
-            "SELECT text FROM bot_ads WHERE enabled=TRUE AND placement=%s ORDER BY id",
+            "SELECT id,text,media_file_id,media_group_id FROM bot_ads "
+            "WHERE enabled=TRUE AND placement=%s ORDER BY id",
             (placement,)
         ).fetchall()
+
+    grouped = {}
     for row in rows:
-        await context.bot.send_message(chat_id=chat_id, text=row["text"])
+        key = row["media_group_id"] or f"single-{row['id']}"
+        grouped.setdefault(key, []).append(row)
+
+    for items in grouped.values():
+        photo_rows = [item for item in items if item["media_file_id"]]
+        if photo_rows:
+            for offset in range(0, len(photo_rows), 10):
+                batch = photo_rows[offset:offset + 10]
+                if len(batch) > 1:
+                    media = [
+                        InputMediaPhoto(
+                            media=item["media_file_id"],
+                            caption=(item["text"] or "") if index == 0 else None
+                        )
+                        for index, item in enumerate(batch)
+                    ]
+                    await context.bot.send_media_group(chat_id=chat_id, media=media)
+                elif batch:
+                    await context.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=batch[0]["media_file_id"],
+                        caption=batch[0]["text"] or None
+                    )
+        else:
+            for item in items:
+                if item["text"]:
+                    await context.bot.send_message(chat_id=chat_id, text=item["text"])
 
 async def show_history(query):
     uid = query.from_user.id
@@ -777,7 +810,7 @@ async def admin_callback(q, context):
                 "SELECT COUNT(*) AS n FROM downloads WHERE status='success'"
             ).fetchone()["n"]
         await q.edit_message_text(
-            f"📊 Dashboard\nUsers: {users}\nDownloads total: {total}\nToday: {today}",
+            f"📊 MediaX Dashboard\nUsers: {users}\nDownloads total: {total}\nToday: {today}",
             reply_markup=admin_keyboard()
         )
     elif action == "adm_users":
@@ -836,7 +869,8 @@ async def admin_callback(q, context):
             f"{r['id']} [{r['placement']}] {'ON' if r['enabled'] else 'OFF'}: {r['text'][:80]}"
             for r in rows
         )
-        text += "\n\nထည့်ရန်: /addad welcome|after_download စာသား\n"
+        text += "\n\nစာသား Ad: /addad welcome စာသား\n"
+        text += "Photo Album: /addad welcome → ပုံများပို့ → /savead caption\n"
         text += "ဖွင့်/ပိတ်: /togglead ID\nဖျက်ရန်: /delad ID"
         await q.edit_message_text(text or "Ads မရှိသေးပါ။", reply_markup=admin_keyboard())
     elif action == "adm_forcejoin":
@@ -1282,18 +1316,82 @@ async def delbutton_cmd(update, context):
     await update.message.reply_text("Button ဖျက်ပြီးပါပြီ။")
 
 async def addad_cmd(update, context):
-    if not await admin_only(update, context): return
-    raw = " ".join(context.args)
-    if " " not in raw:
-        await update.message.reply_text("အသုံးပြုရန်: /addad welcome စာသား သို့ /addad after_download စာသား"); return
-    placement, message = raw.split(" ", 1)
-    placement = placement.strip().lower()
-    if placement not in ("welcome", "after_download") or not message.strip():
-        await update.message.reply_text("Placement ကို welcome သို့ after_download သတ်မှတ်ပါ။"); return
+    if not await admin_only(update, context):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "စာသား Ad: /addad welcome စာသား\n"
+            "Photo Album: /addad welcome ပြီးရင် ပုံတွေ ပို့ပြီး /savead [caption] နှိပ်ပါ။"
+        )
+        return
+    placement = context.args[0].strip().lower()
+    if placement not in ("welcome", "after_download"):
+        await update.message.reply_text("Placement ကို welcome သို့ after_download သတ်မှတ်ပါ။")
+        return
+    message = " ".join(context.args[1:]).strip()
+    if not message:
+        context.user_data["pending_ad_placement"] = placement
+        context.user_data["pending_ad_photos"] = []
+        await update.message.reply_text(
+            f"📸 {placement} Photo Ad အတွက် ပုံတွေကို တစ်ပုံချင်း သို့မဟုတ် Album အနေနဲ့ ပို့ပါ။\n"
+            "ပြီးရင် /savead [caption] ကိုနှိပ်ပါ။ မလုပ်တော့ရင် /cancelad နှိပ်ပါ။"
+        )
+        return
     with db() as conn:
-        conn.execute("INSERT INTO bot_ads(placement,text) VALUES(%s,%s)", (placement, message.strip()))
-    log_admin("addad", placement)
-    await update.message.reply_text("Ad ထည့်ပြီးပါပြီ။")
+        conn.execute(
+            "INSERT INTO bot_ads(placement,text) VALUES(%s,%s)",
+            (placement, message)
+        )
+    log_admin("addad_text", placement)
+    await update.message.reply_text("စာသား Ad ထည့်ပြီးပါပြီ။")
+
+
+async def handle_ad_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    placement = context.user_data.get("pending_ad_placement")
+    if not placement:
+        await update.message.reply_text(
+            "Photo Ad ထည့်ရန် အရင် /addad welcome သို့ /addad after_download လုပ်ပါ။"
+        )
+        return
+    photos = context.user_data.setdefault("pending_ad_photos", [])
+    photos.append(update.message.photo[-1].file_id)
+    await update.message.reply_text(
+        f"✅ ပုံ {len(photos)} ပုံ သိမ်းဆည်းရန် အဆင်သင့်ဖြစ်ပါပြီ။\n"
+        "နောက်ထပ်ပုံပို့နိုင်သလို ပြီးရင် /savead [caption] နှိပ်ပါ။"
+    )
+
+
+async def savead_cmd(update, context):
+    if not await admin_only(update, context):
+        return
+    placement = context.user_data.get("pending_ad_placement")
+    photos = context.user_data.get("pending_ad_photos", [])
+    if not placement or not photos:
+        await update.message.reply_text("သိမ်းရန် Photo မရှိသေးပါ။ /addad placement နဲ့ စပါ။")
+        return
+    caption = " ".join(context.args).strip()
+    group_id = f"mediax-{update.effective_user.id}-{int(time.time())}"
+    with db() as conn:
+        for file_id in photos:
+            conn.execute(
+                "INSERT INTO bot_ads(placement,text,media_file_id,media_group_id) "
+                "VALUES(%s,%s,%s,%s)",
+                (placement, caption, file_id, group_id)
+            )
+    log_admin("addad_photos", f"{placement}: {len(photos)} photos")
+    context.user_data.pop("pending_ad_placement", None)
+    context.user_data.pop("pending_ad_photos", None)
+    await update.message.reply_text(f"✅ Photo Ad {len(photos)} ပုံ သိမ်းပြီးပါပြီ။")
+
+
+async def cancelad_cmd(update, context):
+    if not await admin_only(update, context):
+        return
+    context.user_data.pop("pending_ad_placement", None)
+    context.user_data.pop("pending_ad_photos", None)
+    await update.message.reply_text("Photo Ad ပြင်ဆင်မှု ပယ်ဖျက်ပြီးပါပြီ။")
 
 async def togglead_cmd(update, context):
     if not await admin_only(update, context): return
@@ -1344,7 +1442,7 @@ async def backup_cmd(update, context):
 
 async def admin_command(update, context):
     if not await admin_only(update, context): return
-    await update.message.reply_text("Admin Panel", reply_markup=admin_keyboard())
+    await update.message.reply_text("MediaX Admin Dashboard", reply_markup=admin_keyboard())
 
 async def error_handler(update, context):
     # Telegram raises this harmless error when an edit repeats identical text/markup.
@@ -1399,6 +1497,9 @@ def main():
     app.add_handler(CommandHandler("addbutton", addbutton_cmd))
     app.add_handler(CommandHandler("delbutton", delbutton_cmd))
     app.add_handler(CommandHandler("addad", addad_cmd))
+    app.add_handler(CommandHandler("savead", savead_cmd))
+    app.add_handler(CommandHandler("cancelad", cancelad_cmd))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, handle_ad_photo))
     app.add_handler(CommandHandler("togglead", togglead_cmd))
     app.add_handler(CommandHandler("delad", delad_cmd))
     app.add_handler(CommandHandler("backup", backup_cmd))
