@@ -171,6 +171,14 @@ def init_db():
             ('rate_minute','3'), ('rate_hour','20'), ('rate_day','100')
             ON CONFLICT(key) DO NOTHING
         """)
+        conn.execute(
+            "UPDATE bot_settings SET value=%s WHERE key='welcome' "
+            "AND value=%s",
+            (
+                "မင်္ဂလာပါ။ MediaX မှ ကြိုဆိုပါတယ်။ TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။",
+                "မင်္ဂလာပါ။deflink ပို့ပြီး Download လုပ်နိုင်ပါတယ်။"
+            )
+        )
 
 def setting(key, default=""):
     with db() as conn:
@@ -1361,6 +1369,8 @@ async def handle_ad_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     photos = context.user_data.setdefault("pending_ad_photos", [])
     photos.append(update.message.photo[-1].file_id)
+    if update.message.caption:
+        context.user_data["pending_ad_caption"] = update.message.caption.strip()
     await update.message.reply_text(
         f"✅ ပုံ {len(photos)} ပုံ သိမ်းဆည်းရန် အဆင်သင့်ဖြစ်ပါပြီ။\n"
         "နောက်ထပ်ပုံပို့နိုင်သလို ပြီးရင် /savead [caption] နှိပ်ပါ။"
@@ -1375,7 +1385,7 @@ async def savead_cmd(update, context):
     if not placement or not photos:
         await update.message.reply_text("သိမ်းရန် Photo မရှိသေးပါ။ /addad placement နဲ့ စပါ။")
         return
-    caption = " ".join(context.args).strip()
+    caption = " ".join(context.args).strip() or context.user_data.get("pending_ad_caption", "")
     group_id = f"mediax-{update.effective_user.id}-{int(time.time())}"
     with db() as conn:
         for file_id in photos:
@@ -1387,6 +1397,7 @@ async def savead_cmd(update, context):
     log_admin("addad_photos", f"{placement}: {len(photos)} photos")
     context.user_data.pop("pending_ad_placement", None)
     context.user_data.pop("pending_ad_photos", None)
+    context.user_data.pop("pending_ad_caption", None)
     await update.message.reply_text(f"✅ Photo Ad {len(photos)} ပုံ သိမ်းပြီးပါပြီ။")
 
 
@@ -1395,6 +1406,7 @@ async def cancelad_cmd(update, context):
         return
     context.user_data.pop("pending_ad_placement", None)
     context.user_data.pop("pending_ad_photos", None)
+    context.user_data.pop("pending_ad_caption", None)
     await update.message.reply_text("Photo Ad ပြင်ဆင်မှု ပယ်ဖျက်ပြီးပါပြီ။")
 
 async def togglead_cmd(update, context):
