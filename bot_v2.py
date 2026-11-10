@@ -217,6 +217,8 @@ def force_join_keyboard(channels):
 
 
 async def check_force_join(uid, context):
+    if uid == ADMIN_ID:
+        return True, []
     if setting("force_join_enabled", "off").lower() != "on":
         return True, []
     channels = get_force_join_channels()
@@ -701,8 +703,9 @@ async def show_history(query):
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
-    await q.answer()
     data = q.data
+    if data != "fj_check":
+        await q.answer()
     if data == "fj_check":
         joined, missing = await check_force_join(q.from_user.id, context)
         if not joined:
@@ -842,15 +845,15 @@ async def admin_callback(q, context):
                 "SELECT id,channel,invite_url,enabled FROM force_join_channels ORDER BY id DESC"
             ).fetchall()
         state = setting("force_join_enabled", "off").upper()
-        details = "\\n".join(
+        details = "\n".join(
             f"{row['id']}. {row['channel']} — {'ON' if row['enabled'] else 'OFF'}"
             for row in rows
         ) or "Channel မထည့်ရသေးပါ။"
         text = (
-            f"📢 Force Join: {state}\\n\\n{details}\\n\\n"
-            "Channel ထည့်ရန်: /addchannel @channel https://t.me/channel\\n"
-            "ဖျက်ရန်: /delchannel ID\\n"
-            "ဖွင့်/ပိတ်ရန်: /forcejoin on သို့ /forcejoin off\\n\\n"
+            f"📢 Force Join: {state}\n\n{details}\n\n"
+            "Channel ထည့်ရန်: /addchannel @channel https://t.me/channel\n"
+            "ဖျက်ရန်: /delchannel ID\n"
+            "ဖွင့်/ပိတ်ရန်: /forcejoin on သို့ /forcejoin off\n\n"
             "မှတ်ချက်: Membership စစ်ဆေးရန် Bot ကို Channel ထဲတွင် Admin ပေးထားပါ။"
         )
         await q.edit_message_text(text, reply_markup=admin_keyboard())
@@ -1313,7 +1316,7 @@ async def delad_cmd(update, context):
 
 async def create_backup(chat_id, context):
     tables = ["users", "downloads", "bot_settings", "bot_buttons", "bot_ads",
-              "admin_logs", "error_logs", "request_events", "backup_log"]
+              "force_join_channels", "admin_logs", "error_logs", "request_events", "backup_log"]
     backup = {"created_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
     try:
         with db() as conn:
