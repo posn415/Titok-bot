@@ -24,11 +24,11 @@ from telegram.ext import (
 )
 
 # ---------------------------------------------------------------------
-# P TikTok V2 - isolated test deployment
+# MediaX - official release preparation
 # Required environment variables:
 #   BOT_TOKEN, DATABASE_URL
 # Optional:
-#   ADMIN_ID (default 8556272994), RENDER_URL (test service URL only)
+#   ADMIN_ID (default 8556272994), RENDER_URL
 #   MAX_FILE_MB (default 45), CONTACT_USERNAME (default P_digital3)
 # ---------------------------------------------------------------------
 
@@ -46,7 +46,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
-log = logging.getLogger("p-tiktok-v2")
+log = logging.getLogger("mediax")
 web = Flask(__name__)
 
 if not TOKEN or not DATABASE_URL:
@@ -117,6 +117,15 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS force_join_channels (
+                id BIGSERIAL PRIMARY KEY,
+                channel TEXT NOT NULL,
+                invite_url TEXT NOT NULL,
+                enabled BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS admin_logs (
                 id BIGSERIAL PRIMARY KEY,
                 admin_id BIGINT,
@@ -153,7 +162,8 @@ def init_db():
         conn.execute("""
             INSERT INTO bot_settings(key,value) VALUES
             ('maintenance','off'),
-            ('welcome','မင်္ဂလာပါ။deflink ပို့ပြီး Download လုပ်နိုင်ပါတယ်။'),
+            ('welcome','မင်္ဂလာပါ။ MediaX မှ ကြိုဆိုပါတယ်။ TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။'),
+            ('force_join_enabled','off'),
             ('rate_minute','3'), ('rate_hour','20'), ('rate_day','100')
             ON CONFLICT(key) DO NOTHING
         """)
@@ -187,6 +197,61 @@ def record_user(user):
               first_name=EXCLUDED.first_name,
               last_seen=NOW()
         """, (user.id, user.username, user.first_name))
+
+
+def get_force_join_channels():
+    with db() as conn:
+        return conn.execute(
+            "SELECT id,channel,invite_url FROM force_join_channels "
+            "WHERE enabled=TRUE ORDER BY id ASC"
+        ).fetchall()
+
+
+def force_join_keyboard(channels):
+    rows = [
+        [InlineKeyboardButton(f"📢 Join {str(row['channel'])[:35]}", url=row["invite_url"])]
+        for row in channels
+    ]
+    rows.append([InlineKeyboardButton("✅ I've Joined — Verify", callback_data="fj_check")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def check_force_join(uid, context):
+    if setting("force_join_enabled", "off").lower() != "on":
+        return True, []
+    channels = get_force_join_channels()
+    if not channels:
+        return True, []
+    missing = []
+    for channel in channels:
+        try:
+            member = await context.bot.get_chat_member(
+                chat_id=channel["channel"], user_id=uid
+            )
+            status = getattr(member, "status", "")
+            is_member = status in ("member", "administrator", "creator")
+            if status == "restricted":
+                is_member = bool(getattr(member, "is_member", False))
+            if not is_member:
+                missing.append(channel)
+        except Exception as exc:
+            log.warning(
+                "Force-join check failed for %s: %s",
+                channel["channel"], str(exc)[:180]
+            )
+            missing.append(channel)
+    return not missing, missing
+
+
+async def send_force_join_prompt(chat_id, channels, context):
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "🔒 MediaX ကို အသုံးပြုရန် အောက်ပါ Channel များကို Join လုပ်ပေးပါ။\n"
+            "Join ပြီးပါက I've Joined — Verify ကိုနှိပ်ပါ။"
+        ),
+        reply_markup=force_join_keyboard(channels)
+    )
 
 def user_status(uid):
     with db() as conn:
@@ -586,6 +651,7 @@ def admin_keyboard():
          InlineKeyboardButton("📣 Ads", callback_data="adm_ads")],
         [InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors"),
          InlineKeyboardButton("💾 Backup", callback_data="adm_backup")],
+        [InlineKeyboardButton("📢 Force Join Channels", callback_data="adm_forcejoin")],
     ])
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -595,7 +661,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if banned:
         await update.message.reply_text("အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
         return
-    welcome = setting("welcome", "မင်္ဂလာပါ။ TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။")
+    joined, missing = await check_force_join(user.id, context)
+    if not joined:
+        await send_force_join_prompt(update.effective_chat.id, missing, context)
+        return
+    welcome = setting(
+        "welcome",
+        "မင်္ဂလာပါ။ MediaX မှ ကြိုဆိုပါတယ်။ TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။"
+    )
     await update.message.reply_text(welcome, reply_markup=await main_keyboard())
     await send_ads(update.effective_chat.id, "welcome", context)
     if is_admin(user.id):
@@ -630,6 +703,23 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data
+    if data == "fj_check":
+        joined, missing = await check_force_join(q.from_user.id, context)
+        if not joined:
+            await q.answer("Channel အားလုံး Join လုပ်ပြီးမှ Verify လုပ်ပါ။", show_alert=True)
+            try:
+                await q.edit_message_reply_markup(
+                    reply_markup=force_join_keyboard(missing)
+                )
+            except BadRequest:
+                pass
+            return
+        await q.answer("Membership verified!")
+        await q.message.reply_text(
+            "✅ အတည်ပြုပြီးပါပြီ။ MediaX ကို အသုံးပြုနိုင်ပါပြီ။",
+            reply_markup=await main_keyboard()
+        )
+        return
     if data == "guide":
         await q.edit_message_text(
             "📘 အသုံးပြုနည်း\n1. TikTok video/photo link ကို Copy လုပ်ပါ။\n"
@@ -746,6 +836,24 @@ async def admin_callback(q, context):
         text += "\n\nထည့်ရန်: /addad welcome|after_download စာသား\n"
         text += "ဖွင့်/ပိတ်: /togglead ID\nဖျက်ရန်: /delad ID"
         await q.edit_message_text(text or "Ads မရှိသေးပါ။", reply_markup=admin_keyboard())
+    elif action == "adm_forcejoin":
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id,channel,invite_url,enabled FROM force_join_channels ORDER BY id DESC"
+            ).fetchall()
+        state = setting("force_join_enabled", "off").upper()
+        details = "\\n".join(
+            f"{row['id']}. {row['channel']} — {'ON' if row['enabled'] else 'OFF'}"
+            for row in rows
+        ) or "Channel မထည့်ရသေးပါ။"
+        text = (
+            f"📢 Force Join: {state}\\n\\n{details}\\n\\n"
+            "Channel ထည့်ရန်: /addchannel @channel https://t.me/channel\\n"
+            "ဖျက်ရန်: /delchannel ID\\n"
+            "ဖွင့်/ပိတ်ရန်: /forcejoin on သို့ /forcejoin off\\n\\n"
+            "မှတ်ချက်: Membership စစ်ဆေးရန် Bot ကို Channel ထဲတွင် Admin ပေးထားပါ။"
+        )
+        await q.edit_message_text(text, reply_markup=admin_keyboard())
     elif action == "adm_errors":
         with db() as conn:
             rows = conn.execute("SELECT error,created_at FROM error_logs ORDER BY id DESC LIMIT 8").fetchall()
@@ -759,6 +867,11 @@ async def admin_callback(q, context):
         await q.edit_message_text("မသိသော command", reply_markup=admin_keyboard())
 
 async def process_download(chat_id, uid, username, url, quality, kind, context):
+    joined, missing = await check_force_join(uid, context)
+    if not joined:
+        await send_force_join_prompt(chat_id, missing, context)
+        return
+
     if setting("maintenance", "off").lower() == "on" and uid != ADMIN_ID:
         await context.bot.send_message(chat_id, "Bot maintenance လုပ်နေပါတယ်။ နောက်မှပြန်စမ်းပါ။")
         return
@@ -921,6 +1034,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
         return
 
+    joined, missing = await check_force_join(user.id, context)
+    if not joined:
+        await send_force_join_prompt(update.effective_chat.id, missing, context)
+        return
+
     # Resolve short TikTok links to identify photo posts.
     photo_link = "/photo/" in url
 
@@ -1080,6 +1198,66 @@ async def unban_cmd(update, context):
     log_admin("unban", str(uid))
     await update.message.reply_text(f"{uid} ကို unban လုပ်ပြီးပါပြီ။")
 
+async def forcejoin_cmd(update, context):
+    if not await admin_only(update, context):
+        return
+    if not context.args or context.args[0].lower() not in ("on", "off"):
+        await update.message.reply_text("အသုံးပြုရန်: /forcejoin on သို့ /forcejoin off")
+        return
+    value = context.args[0].lower()
+    set_setting("force_join_enabled", value)
+    log_admin("forcejoin", value)
+    await update.message.reply_text(f"Force Join {value.upper()} ပြီးပါပြီ။")
+
+
+async def addchannel_cmd(update, context):
+    if not await admin_only(update, context):
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "အသုံးပြုရန်: /addchannel @channel https://t.me/channel"
+        )
+        return
+    channel, invite_url = context.args
+    if not (channel.startswith("@") or channel.startswith("-100")):
+        await update.message.reply_text("Channel ကို @username သို့မဟုတ် -100 ID ပုံစံထည့်ပါ။")
+        return
+    if not invite_url.startswith("https://t.me/"):
+        await update.message.reply_text("Invite URL သည် https://t.me/ ဖြင့် စရပါမယ်။")
+        return
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO force_join_channels(channel,invite_url) VALUES(%s,%s)",
+            (channel, invite_url)
+        )
+    log_admin("add_force_join_channel", channel)
+    await update.message.reply_text(
+        "Channel ထည့်ပြီးပါပြီ။ Bot ကို အဲဒီ Channel ထဲမှာ Admin ပေးပြီး /forcejoin on လုပ်ပါ။"
+    )
+
+
+async def delchannel_cmd(update, context):
+    if not await admin_only(update, context):
+        return
+    if not context.args:
+        await update.message.reply_text("အသုံးပြုရန်: /delchannel ID")
+        return
+    try:
+        channel_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID မမှန်ပါ။")
+        return
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM force_join_channels WHERE id=%s RETURNING id",
+            (channel_id,)
+        ).fetchone()
+    log_admin("delete_force_join_channel", str(channel_id))
+    await update.message.reply_text(
+        "Channel ဖျက်ပြီးပါပြီ။" if result else "အဲဒီ ID မတွေ့ပါ။"
+    )
+
+
 async def addbutton_cmd(update, context):
     if not await admin_only(update, context): return
     if len(context.args) < 2 or not context.args[-1].startswith("https://"):
@@ -1147,8 +1325,8 @@ async def create_backup(chat_id, context):
                 ]
         raw = json.dumps(backup, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         file = BytesIO(raw)
-        file.name = f"p_tiktok_backup_{datetime.now():%Y%m%d_%H%M%S}.json"
-        await context.bot.send_document(chat_id, file, caption="Database backup (JSON)")
+        file.name = f"mediax_backup_{datetime.now():%Y%m%d_%H%M%S}.json"
+        await context.bot.send_document(chat_id, file, caption="MediaX Database Backup (JSON)")
         with db() as conn:
             conn.execute("INSERT INTO backup_log(status,details) VALUES('success','Manual backup sent')")
         log_admin("backup", "manual success")
@@ -1188,7 +1366,7 @@ def health():
     try:
         with db() as conn:
             conn.execute("SELECT 1")
-        return jsonify({"status": "ok", "service": "P TikTok V2", "database": "ok"})
+        return jsonify({"status": "ok", "service": "MediaX", "database": "ok"})
     except Exception:
         return jsonify({"status": "degraded", "database": "error"}), 503
 
@@ -1198,7 +1376,7 @@ def run_web():
 
 async def post_init(app: Application):
     init_db()
-    log.info("V2 bot started. Admin ID=%s", ADMIN_ID)
+    log.info("MediaX bot started. Admin ID=%s", ADMIN_ID)
 
 def main():
     import threading
@@ -1212,6 +1390,9 @@ def main():
     app.add_handler(CommandHandler("ban", ban_cmd))
     app.add_handler(CommandHandler("tempban", tempban_cmd))
     app.add_handler(CommandHandler("unban", unban_cmd))
+    app.add_handler(CommandHandler("forcejoin", forcejoin_cmd))
+    app.add_handler(CommandHandler("addchannel", addchannel_cmd))
+    app.add_handler(CommandHandler("delchannel", delchannel_cmd))
     app.add_handler(CommandHandler("addbutton", addbutton_cmd))
     app.add_handler(CommandHandler("delbutton", delbutton_cmd))
     app.add_handler(CommandHandler("addad", addad_cmd))
