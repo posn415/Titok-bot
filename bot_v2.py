@@ -553,13 +553,26 @@ def extract_mp3(video_bytes):
 def is_admin(uid):
     return uid == ADMIN_ID
 
-def main_keyboard():
-    return InlineKeyboardMarkup([
+async def main_keyboard():
+    rows = [
         [InlineKeyboardButton("📘 Download Guide", callback_data="guide"),
          InlineKeyboardButton("📂 My History", callback_data="history")],
         [InlineKeyboardButton("❓ Help", callback_data="help"),
          InlineKeyboardButton("☎️ Contact Admin", url=f"https://t.me/{CONTACT_USERNAME}")],
-    ])
+    ]
+    try:
+        with db() as conn:
+            buttons = conn.execute(
+                "SELECT label,url FROM bot_buttons WHERE enabled=TRUE ORDER BY id ASC"
+            ).fetchall()
+        for button in buttons:
+            label = str(button["label"]).strip()[:64]
+            url = str(button["url"]).strip()
+            if label and url.startswith(("https://", "http://")):
+                rows.append([InlineKeyboardButton(label, url=url)])
+    except Exception:
+        log.exception("Could not load custom start buttons")
+    return InlineKeyboardMarkup(rows)
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
@@ -583,7 +596,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
         return
     welcome = setting("welcome", "မင်္ဂလာပါ။ TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။")
-    await update.message.reply_text(welcome, reply_markup=main_keyboard())
+    await update.message.reply_text(welcome, reply_markup=await main_keyboard())
     await send_ads(update.effective_chat.id, "welcome", context)
     if is_admin(user.id):
         await update.message.reply_text("Admin Panel", reply_markup=admin_keyboard())
@@ -605,13 +618,13 @@ async def show_history(query):
             FROM downloads WHERE user_id=%s ORDER BY id DESC LIMIT 10
         """, (uid,)).fetchall()
     if not rows:
-        await query.edit_message_text("Download history မရှိသေးပါ။", reply_markup=main_keyboard())
+        await query.edit_message_text("Download history မရှိသေးပါ။", reply_markup=await main_keyboard())
         return
     lines = ["📂 နောက်ဆုံး Download ၁၀ ခု"]
     for r in rows:
         stamp = r["downloaded_at"].strftime("%Y-%m-%d %H:%M")
         lines.append(f"• {r['media_type']} | {r['status']} | {stamp}\n{r['video_url']}")
-    await query.edit_message_text("\n\n".join(lines), reply_markup=main_keyboard())
+    await query.edit_message_text("\n\n".join(lines), reply_markup=await main_keyboard())
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -622,13 +635,13 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📘 အသုံးပြုနည်း\n1. TikTok video/photo link ကို Copy လုပ်ပါ။\n"
             "2. ဒီ Bot ထဲ Paste လုပ်ပို့ပါ။\n3. Video ဖြစ်ရင် Quality ရွေးပါ။\n"
             "4. MP3 လိုချင်ရင် MP3 ကိုရွေးပါ။",
-            reply_markup=main_keyboard()
+            reply_markup=await main_keyboard()
         )
     elif data == "help":
         await q.edit_message_text(
             "TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။ မရပါက ခဏစောင့်ပြီး ပြန်စမ်းပါ။\n"
             f"အကူအညီ: @{CONTACT_USERNAME}",
-            reply_markup=main_keyboard()
+            reply_markup=await main_keyboard()
         )
     elif data == "history":
         await show_history(q)
@@ -847,7 +860,7 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
             await context.bot.send_message(
                 chat_id,
                 "✅ ပြီးပါပြီ။",
-                reply_markup=main_keyboard()
+                reply_markup=await main_keyboard()
             )
             await send_ads(chat_id, "after_download", context)
 
@@ -897,7 +910,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not match:
         await update.message.reply_text(
             "TikTok link ကို ပို့ပေးပါ။",
-            reply_markup=main_keyboard()
+            reply_markup=await main_keyboard()
         )
         return
 
