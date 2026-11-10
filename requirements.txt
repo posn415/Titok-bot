@@ -4,3 +4,4 @@ requests
 curl_cffi
 psycopg[binary]
 imageio-ffmpeg
+gallery-dl
