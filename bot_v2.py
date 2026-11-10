@@ -655,14 +655,14 @@ async def main_keyboard():
 
 def admin_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Dashboard", callback_data="adm_stats"),
-         InlineKeyboardButton("👥 Users", callback_data="adm_users")],
+        [InlineKeyboardButton("📊 Overview", callback_data="adm_stats"),
+         InlineKeyboardButton("👥 User Manager", callback_data="adm_users")],
         [InlineKeyboardButton("📥 Recent Downloads", callback_data="adm_downloads"),
          InlineKeyboardButton("⚙️ Settings", callback_data="adm_settings")],
         [InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast_help"),
          InlineKeyboardButton("🚫 Ban / Unban", callback_data="adm_ban_help")],
-        [InlineKeyboardButton("🔘 Buttons", callback_data="adm_buttons"),
-         InlineKeyboardButton("📣 Ads", callback_data="adm_ads")],
+        [InlineKeyboardButton("🔘 Button Manager", callback_data="adm_buttons"),
+         InlineKeyboardButton("🖼️ Ads Manager", callback_data="adm_ads")],
         [InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors"),
          InlineKeyboardButton("💾 Backup", callback_data="adm_backup")],
         [InlineKeyboardButton("📢 Force Join Channels", callback_data="adm_forcejoin")],
@@ -898,8 +898,9 @@ async def admin_callback(q, context):
         text = (
             f"📢 Force Join: {state}\n\n{details}\n\n"
             "Channel ထည့်ရန်: /addchannel @channel https://t.me/channel\n"
+            "ဖွင့်/ပိတ်ရန်: /togglechannel ID\n"
             "ဖျက်ရန်: /delchannel ID\n"
-            "ဖွင့်/ပိတ်ရန်: /forcejoin on သို့ /forcejoin off\n\n"
+            "စနစ်ဖွင့်/ပိတ်ရန်: /forcejoin on သို့ /forcejoin off\n\n"
             "မှတ်ချက်: Membership စစ်ဆေးရန် Bot ကို Channel ထဲတွင် Admin ပေးထားပါ။"
         )
         await q.edit_message_text(text, reply_markup=admin_keyboard())
@@ -1274,6 +1275,20 @@ async def addchannel_cmd(update, context):
     if not invite_url.startswith("https://t.me/"):
         await update.message.reply_text("Invite URL သည် https://t.me/ ဖြင့် စရပါမယ်။")
         return
+    try:
+        chat = await context.bot.get_chat(channel)
+        bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+        if getattr(bot_member, "status", "") not in ("administrator", "creator"):
+            await update.message.reply_text(
+                "အရင်ဆုံး Bot ကို Channel ထဲမှာ Admin ပေးပြီးမှ ထပ်ထည့်ပါ။"
+            )
+            return
+    except Exception as exc:
+        log.warning("Could not validate Force Join channel %s: %s", channel, str(exc)[:180])
+        await update.message.reply_text(
+            "Channel ကို စစ်မရပါ။ Channel username/ID မှန်မမှန်စစ်ပြီး Bot ကို Admin ပေးထားပါ။"
+        )
+        return
     with db() as conn:
         conn.execute(
             "INSERT INTO force_join_channels(channel,invite_url) VALUES(%s,%s)",
@@ -1281,7 +1296,7 @@ async def addchannel_cmd(update, context):
         )
     log_admin("add_force_join_channel", channel)
     await update.message.reply_text(
-        "Channel ထည့်ပြီးပါပြီ။ Bot ကို အဲဒီ Channel ထဲမှာ Admin ပေးပြီး /forcejoin on လုပ်ပါ။"
+        "Channel ထည့်ပြီးပါပြီ။ /forcejoin on လုပ်ပြီး အသုံးပြုနိုင်ပါပြီ။"
     )
 
 
@@ -1304,6 +1319,32 @@ async def delchannel_cmd(update, context):
     log_admin("delete_force_join_channel", str(channel_id))
     await update.message.reply_text(
         "Channel ဖျက်ပြီးပါပြီ။" if result else "အဲဒီ ID မတွေ့ပါ။"
+    )
+
+
+async def togglechannel_cmd(update, context):
+    if not await admin_only(update, context):
+        return
+    if not context.args:
+        await update.message.reply_text("အသုံးပြုရန်: /togglechannel ID")
+        return
+    try:
+        channel_id = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("ID မမှန်ပါ။")
+        return
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE force_join_channels SET enabled=NOT enabled "
+            "WHERE id=%s RETURNING enabled",
+            (channel_id,)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text("အဲဒီ Channel ID မတွေ့ပါ။")
+        return
+    log_admin("toggle_force_join_channel", f"{channel_id}: {row['enabled']}")
+    await update.message.reply_text(
+        "Channel ကို " + ("ON" if row["enabled"] else "OFF") + " ပြောင်းပြီးပါပြီ။"
     )
 
 
@@ -1529,6 +1570,7 @@ def main():
     app.add_handler(CommandHandler("forcejoin", forcejoin_cmd))
     app.add_handler(CommandHandler("addchannel", addchannel_cmd))
     app.add_handler(CommandHandler("delchannel", delchannel_cmd))
+    app.add_handler(CommandHandler("togglechannel", togglechannel_cmd))
     app.add_handler(CommandHandler("addbutton", addbutton_cmd))
     app.add_handler(CommandHandler("delbutton", delbutton_cmd))
     app.add_handler(CommandHandler("addad", addad_cmd))
