@@ -6,10 +6,10 @@ import asyncio
 import logging
 import tempfile
 import subprocess
+import sys
 from io import BytesIO
 from collections import defaultdict
 from datetime import datetime, timezone
-
 import psycopg
 from psycopg.rows import dict_row
 from flask import Flask, jsonify
@@ -152,7 +152,7 @@ def init_db():
         conn.execute("""
             INSERT INTO bot_settings(key,value) VALUES
             ('maintenance','off'),
-            ('welcome','မင်္ဂလာပါ။ TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။'),
+            ('welcome','မင်္ဂလာပါ။deflink ပို့ပြီး Download လုပ်နိုင်ပါတယ်။'),
             ('rate_minute','3'), ('rate_hour','20'), ('rate_day','100')
             ON CONFLICT(key) DO NOTHING
         """)
@@ -465,6 +465,7 @@ def fetch_bytes(session, url):
 
     return data
 
+
 def get_photo_urls(data):
     images = data.get("images") or []
     urls = []
@@ -478,6 +479,49 @@ def get_photo_urls(data):
         elif isinstance(item.get("url"), str):
             urls.append(item["url"])
     return urls
+
+
+def download_tiktok_photos(url):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        command = [
+            sys.executable,
+            "-m", "gallery_dl",
+            "-D", temp_dir,
+            url
+        ]
+
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=180
+        )
+
+        image_extensions = (".jpg", ".jpeg", ".png", ".webp")
+        photo_paths = []
+
+        for root, dirs, files in os.walk(temp_dir):
+            for filename in files:
+                if filename.lower().endswith(image_extensions):
+                    photo_paths.append(os.path.join(root, filename))
+
+        photo_paths.sort()
+
+        if result.returncode != 0 or not photo_paths:
+            error = (result.stderr or result.stdout or "Photo မတွေ့ပါ။")[-500:]
+            raise RuntimeError("Photo download မအောင်မြင်ပါ။ " + error)
+
+        photos = []
+        for path in photo_paths:
+            with open(path, "rb") as photo_file:
+                photos.append(photo_file.read())
+
+        return photos
+
+
+async def get_tiktok_photos(url):
+    return await asyncio.to_thread(download_tiktok_photos, url)
+
 
 def extract_mp3(video_bytes):
     try:
@@ -718,22 +762,50 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
         await context.bot.send_message(chat_id, "Download တစ်ခု လုပ်နေဆဲပါ။ ပြီးမှ ထပ်လုပ်ပါ။")
         return
     async with lock:
-        try:
-            data, media_session = await asyncio.to_thread(get_tiktok_data, url)
-            photos = get_photo_urls(data)
+        
+            try:
+                data, media_session = await asyncio.to_thread(get_tiktok_data, url)
+                photos = get_photo_urls(data)
+            except Exception:
+                data = {}
+                media_session = None
+                photos = []
+
+            photo_bytes = []
+
             if photos:
                 if kind == "mp3":
                     raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
-                media = []
                 for photo_url in photos:
                     photo = await asyncio.to_thread(fetch_bytes, media_session, photo_url)
-                    media.append(photo)
-                # Telegram accepts up to 10 media items per group.
-                for offset in range(0, len(media), 10):
-                    batch = media[offset:offset + 10]
-                    group = [InputMediaPhoto(media=BytesIO(item)) for item in batch]
-                    await context.bot.send_media_group(chat_id=chat_id, media=group)
+                    photo_bytes.append(photo)
+
+            elif "/photo/" in url:
+                if kind == "mp3":
+                    raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
+                photo_bytes = await get_tiktok_photos(url)
+
+            if photo_bytes:
+                for index, photo in enumerate(photo_bytes, start=1):
+                    photo_file = BytesIO(photo)
+                    photo_file.name = f"tiktok_photo_{index}.jpg"
+
+                    if len(photo) > 10 * 1024 * 1024:
+                        await context.bot.send_document(
+                            chat_id=chat_id,
+                            document=photo_file
+                        )
+                    else:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo_file
+                        )
+
                 media_type = "photo"
+            else:
+                if not data:
+                    raise ValueError("TikTok Post Data မတွေ့ပါ။")
+
             else:
                 video_url = choose_video_url(data, quality)
 
@@ -792,42 +864,92 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                 await context.bot.send_message(ADMIN_ID, f"⚠️ Download error\nUser: {uid}\n{error[:800]}")
             except Exception:
                 pass
-
 user_locks = {}
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     record_user(user)
     text = (update.message.text or "").strip()
-    match = re.search(r"https?://(?:www\.)?(?:vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com)/\S+", text)
+
+    match = re.search(
+        r"https?://(?:www\.)?(?:vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com)/\S+",
+        text
+    )
+
     if not match:
-        await update.message.reply_text("TikTok link ကို ပို့ပေးပါ။", reply_markup=main_keyboard())
+        await update.message.reply_text(
+            "TikTok link ကို ပို့ပေးပါ။",
+            reply_markup=main_keyboard()
+        )
         return
+
     url = match.group(0).rstrip(".,)")
+
     banned, reason = user_status(user.id)
     if banned:
         await update.message.reply_text("အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
         return
+
+    # Resolve short TikTok links to identify photo posts.
+    photo_link = "/photo/" in url
+
+    try:
+        response = await asyncio.to_thread(
+            c_requests.get,
+            url,
+            allow_redirects=True,
+            impersonate="chrome120",
+            timeout=30
+        )
+        resolved_url = str(response.url)
+
+        if "/photo/" in resolved_url:
+            url = resolved_url
+            photo_link = True
+    except Exception as exc:
+        log.warning("TikTok URL resolve failed: %s", str(exc)[:200])
+
+    if photo_link:
+        await update.message.reply_text("📸 Photo slideshow Download စတင်ပါမယ်။")
+        await process_download(
+            update.effective_chat.id,
+            user.id,
+            user.username,
+            url,
+            "original",
+            "video",
+            context
+        )
+        return
+
     try:
         data, _media_session = await asyncio.to_thread(get_tiktok_data, url)
+
         if get_photo_urls(data):
-            context.user_data["pending_url"] = url
-            context.user_data["pending_quality"] = "original"
-            await update.message.reply_text(
-                "📸 Photo slideshow တွေ့ပါပြီ။ Download စတင်ပါမယ်။",
+            await update.message.reply_text("📸 Photo slideshow Download စတင်ပါမယ်။")
+            await process_download(
+                update.effective_chat.id,
+                user.id,
+                user.username,
+                url,
+                "original",
+                "video",
+                context
             )
-            await process_download(update.effective_chat.id, user.id, user.username,
-                                   url, "original", "video", context)
             return
+
     except Exception:
-        # Let the main download path produce the useful error message.
         pass
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("720p", callback_data=f"quality:720p:{url}")],
         [InlineKeyboardButton("1080p", callback_data=f"quality:1080p:{url}")],
-        [InlineKeyboardButton("Original", callback_data=f"quality:original:{url}")],
+        [InlineKeyboardButton("Original", callback_data=f"quality:original:{url}")]
     ])
+
     await update.message.reply_text("Video Quality ရွေးပါ။", reply_markup=keyboard)
+
 
 # ---------------------------------------------------------------------
 # Admin commands
