@@ -748,38 +748,43 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
     if setting("maintenance", "off").lower() == "on" and uid != ADMIN_ID:
         await context.bot.send_message(chat_id, "Bot maintenance လုပ်နေပါတယ်။ နောက်မှပြန်စမ်းပါ။")
         return
+
     banned, reason = user_status(uid)
     if banned:
         await context.bot.send_message(chat_id, "အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
         return
+
     allowed, message = check_rate_limit(uid)
     if not allowed:
         await context.bot.send_message(chat_id, message)
         return
-    # A per-user lock prevents simultaneous downloads in the same process.
+
     lock = user_locks.setdefault(uid, asyncio.Lock())
     if lock.locked():
         await context.bot.send_message(chat_id, "Download တစ်ခု လုပ်နေဆဲပါ။ ပြီးမှ ထပ်လုပ်ပါ။")
         return
+
     async with lock:
-        
+        try:
+            data = {}
+            media_session = None
+            photo_bytes = []
+            media_type = kind
+
             try:
                 data, media_session = await asyncio.to_thread(get_tiktok_data, url)
-                photos = get_photo_urls(data)
-            except Exception:
-                data = {}
-                media_session = None
-                photos = []
+            except Exception as exc:
+                log.warning("TikTok metadata lookup failed: %s", str(exc)[:200])
 
-            photo_bytes = []
+            photos = get_photo_urls(data) if data else []
 
             if photos:
                 if kind == "mp3":
                     raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
                 for photo_url in photos:
-                    photo = await asyncio.to_thread(fetch_bytes, media_session, photo_url)
-                    photo_bytes.append(photo)
-
+                    photo_bytes.append(
+                        await asyncio.to_thread(fetch_bytes, media_session, photo_url)
+                    )
             elif "/photo/" in url:
                 if kind == "mp3":
                     raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
@@ -789,41 +794,31 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                 for index, photo in enumerate(photo_bytes, start=1):
                     photo_file = BytesIO(photo)
                     photo_file.name = f"tiktok_photo_{index}.jpg"
-
                     if len(photo) > 10 * 1024 * 1024:
-                        await context.bot.send_document(
-                            chat_id=chat_id,
-                            document=photo_file
-                        )
+                        await context.bot.send_document(chat_id=chat_id, document=photo_file)
                     else:
-                        await context.bot.send_photo(
-                            chat_id=chat_id,
-                            photo=photo_file
-                        )
-
+                        await context.bot.send_photo(chat_id=chat_id, photo=photo_file)
                 media_type = "photo"
             else:
                 if not data:
                     raise ValueError("TikTok Post Data မတွေ့ပါ။")
 
-            else:
                 video_url = choose_video_url(data, quality)
-
                 if kind == "mp3":
                     video_bytes = await asyncio.to_thread(fetch_bytes, media_session, video_url)
                     audio = await asyncio.to_thread(extract_mp3, video_bytes)
-                    await context.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=BytesIO(audio),
-                        filename="tiktok_audio.mp3"
-                    )
+                    audio_file = BytesIO(audio)
+                    audio_file.name = "tiktok_audio.mp3"
+                    await context.bot.send_audio(chat_id=chat_id, audio=audio_file)
                     media_type = "mp3"
                 else:
                     try:
                         video_bytes = await asyncio.to_thread(fetch_bytes, media_session, video_url)
+                        video_file = BytesIO(video_bytes)
+                        video_file.name = "tiktok_video.mp4"
                         await context.bot.send_video(
                             chat_id=chat_id,
-                            video=BytesIO(video_bytes),
+                            video=video_file,
                             supports_streaming=True,
                             read_timeout=120,
                             write_timeout=120
@@ -840,30 +835,51 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                             read_timeout=120,
                             write_timeout=120
                         )
-
                     media_type = "video"
+
             with db() as conn:
                 conn.execute("""
                     INSERT INTO downloads(user_id,username,video_url,status,media_type,quality)
                     VALUES(%s,%s,%s,'success',%s,%s)
                 """, (uid, username, url, media_type, quality))
-            await context.bot.send_message(chat_id, "✅ ပြီးပါပြီ။", reply_markup=main_keyboard())
+
+            await context.bot.send_message(
+                chat_id,
+                "✅ ပြီးပါပြီ။",
+                reply_markup=main_keyboard()
+            )
             await send_ads(chat_id, "after_download", context)
+
         except Exception as exc:
             log.exception("Download failed for %s", uid)
             error = str(exc)[:1000]
-            with db() as conn:
-                conn.execute(
-                    "INSERT INTO downloads(user_id,username,video_url,status,media_type,quality,error) "
-                    "VALUES(%s,%s,%s,'failed',%s,%s,%s)",
-                    (uid, username, url, kind, quality, error)
-                )
-                conn.execute("INSERT INTO error_logs(user_id,error) VALUES(%s,%s)", (uid, error))
-            await context.bot.send_message(chat_id, f"❌ Download မအောင်မြင်ပါ။\n{error[:350]}")
             try:
-                await context.bot.send_message(ADMIN_ID, f"⚠️ Download error\nUser: {uid}\n{error[:800]}")
+                with db() as conn:
+                    conn.execute(
+                        "INSERT INTO downloads(user_id,username,video_url,status,media_type,quality,error) "
+                        "VALUES(%s,%s,%s,'failed',%s,%s,%s)",
+                        (uid, username, url, kind, quality, error)
+                    )
+                    conn.execute(
+                        "INSERT INTO error_logs(user_id,error) VALUES(%s,%s)",
+                        (uid, error)
+                    )
+            except Exception:
+                log.exception("Failed to save download error to database")
+
+            await context.bot.send_message(
+                chat_id,
+                f"❌ Download မအောင်မြင်ပါ။\\n{error[:350]}"
+            )
+            try:
+                await context.bot.send_message(
+                    ADMIN_ID,
+                    f"⚠️ Download error\\nUser: {uid}\\n{error[:800]}"
+                )
             except Exception:
                 pass
+
+
 user_locks = {}
 
 
