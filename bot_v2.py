@@ -1929,7 +1929,7 @@ async def delad_cmd(update, context):
     log_admin("delad", str(aid), update.effective_user.id)
     await update.message.reply_text("Ad ဖျက်ပြီးပါပြီ။")
 
-async def create_backup(chat_id, context, admin_id=None):
+async def create_backup(chat_id, context, admin_id=None, scheduled=False):
     tables = ["users", "downloads", "bot_settings", "bot_buttons", "bot_ads",
               "force_join_channels", "admin_logs", "error_logs", "request_events", "user_feedback", "bot_admins", "backup_log"]
     backup = {"created_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
@@ -1944,14 +1944,57 @@ async def create_backup(chat_id, context, admin_id=None):
         raw = json.dumps(backup, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         file = BytesIO(raw)
         file.name = f"mediax_backup_{datetime.now():%Y%m%d_%H%M%S}.json"
-        await context.bot.send_document(chat_id, file, caption="MediaX Database Backup (JSON)")
+        await context.bot.send_document(
+            chat_id, file,
+            caption=("MediaX Scheduled Database Backup (JSON)" if scheduled
+                     else "MediaX Database Backup (JSON)")
+        )
         with db() as conn:
-            conn.execute("INSERT INTO backup_log(status,details) VALUES('success','Manual backup sent')")
+            conn.execute(
+                "INSERT INTO backup_log(status,details) VALUES(%s,%s)",
+                ("scheduled_success" if scheduled else "success",
+                 "Scheduled backup sent" if scheduled else "Manual backup sent")
+            )
         log_admin("backup", "manual success", admin_id)
     except Exception as exc:
         with db() as conn:
-            conn.execute("INSERT INTO backup_log(status,details) VALUES('failed',%s)", (str(exc)[:1000],))
+            conn.execute(
+                "INSERT INTO backup_log(status,details) VALUES(%s,%s)",
+                ("scheduled_failed" if scheduled else "failed", str(exc)[:1000])
+            )
         await context.bot.send_message(chat_id, f"Backup မအောင်မြင်ပါ: {str(exc)[:300]}")
+
+async def autobackup_cmd(update, context):
+    if not await admin_only(update, context, "backup"):
+        return
+    if not context.args or context.args[0].lower() not in ("on", "off"):
+        await update.message.reply_text(
+            "အသုံးပြုရန်: /autobackup on [နာရီ] သို့ /autobackup off\\n"
+            "ဥပမာ: /autobackup on 24"
+        )
+        return
+    state = context.args[0].lower()
+    if state == "off":
+        set_setting("scheduled_backup_enabled", "off")
+        log_admin("autobackup", "off", update.effective_user.id)
+        await update.message.reply_text("Scheduled Backup ပိတ်ပြီးပါပြီ။")
+        return
+    hours = 24
+    if len(context.args) > 1:
+        try:
+            hours = int(context.args[1])
+            if not 1 <= hours <= 168:
+                raise ValueError()
+        except ValueError:
+            await update.message.reply_text("နာရီကို 1 မှ 168 ကြား ထည့်ပါ။")
+            return
+    set_setting("backup_interval_hours", str(hours))
+    set_setting("scheduled_backup_enabled", "on")
+    log_admin("autobackup", f"on every {hours}h", update.effective_user.id)
+    await update.message.reply_text(
+        f"Scheduled Backup ဖွင့်ပြီးပါပြီ။ {hours} နာရီတစ်ကြိမ် Main Admin ဆီ ပို့ပါမယ်။"
+    )
+
 
 async def backup_cmd(update, context):
     if not await admin_only(update, context, "backup"): return
@@ -1995,8 +2038,29 @@ def run_web():
     port = int(os.getenv("PORT", "10000"))
     web.run(host="0.0.0.0", port=port, use_reloader=False)
 
+async def scheduled_backup_loop(app: Application):
+    while True:
+        try:
+            if setting("scheduled_backup_enabled", "off").lower() == "on":
+                hours = max(1, min(168, int(setting("backup_interval_hours", "24"))))
+                with db() as conn:
+                    last = conn.execute(
+                        "SELECT created_at FROM backup_log WHERE status='scheduled_success' "
+                        "ORDER BY id DESC LIMIT 1"
+                    ).fetchone()
+                due = not last or (
+                    datetime.now(timezone.utc) - last["created_at"]
+                ).total_seconds() >= hours * 3600
+                if due:
+                    await create_backup(ADMIN_ID, app, ADMIN_ID, scheduled=True)
+        except Exception:
+            log.exception("Scheduled backup loop failed")
+        await asyncio.sleep(3600)
+
+
 async def post_init(app: Application):
     init_db()
+    app.create_task(scheduled_backup_loop(app))
     log.info("MediaX bot started. Admin ID=%s", ADMIN_ID)
 
 def main():
@@ -2031,6 +2095,7 @@ def main():
     app.add_handler(CommandHandler("togglead", togglead_cmd))
     app.add_handler(CommandHandler("delad", delad_cmd))
     app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("autobackup", autobackup_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
