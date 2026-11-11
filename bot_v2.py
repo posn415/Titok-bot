@@ -11,6 +11,7 @@ from io import BytesIO
 from collections import defaultdict
 from datetime import datetime, timezone
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 from flask import Flask, jsonify
 from curl_cffi import requests as c_requests
@@ -2098,6 +2099,179 @@ async def autobackup_cmd(update, context):
     )
 
 
+def restore_backup_payload(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("tables"), dict):
+        raise ValueError("Backup JSON ပုံစံ မမှန်ပါ။")
+
+    allowed_tables = {
+        "users", "downloads", "bot_settings", "bot_buttons", "bot_ads",
+        "force_join_channels", "bot_admins", "admin_logs", "error_logs",
+        "request_events", "user_feedback", "backup_log"
+    }
+    restored = {}
+    with db() as conn:
+        for table, rows in payload["tables"].items():
+            if table not in allowed_tables or not isinstance(rows, list):
+                continue
+            if not rows:
+                restored[table] = 0
+                continue
+
+            schema_rows = conn.execute(
+                "SELECT column_name,data_type FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name=%s",
+                (table,)
+            ).fetchall()
+            column_types = {row["column_name"]: row["data_type"] for row in schema_rows}
+            if not column_types:
+                continue
+
+            inserted = 0
+            for raw_row in rows:
+                if not isinstance(raw_row, dict):
+                    continue
+                row_data = {}
+                for key, value in raw_row.items():
+                    if key not in column_types:
+                        continue
+                    data_type = column_types[key]
+                    if value is not None and isinstance(value, str) and data_type in (
+                        "timestamp with time zone", "timestamp without time zone"
+                    ):
+                        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    row_data[key] = value
+                if not row_data:
+                    continue
+                if table == "bot_admins" and int(row_data.get("user_id", 0)) == ADMIN_ID:
+                    continue
+
+                columns = list(row_data)
+                query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
+                    sql.Identifier(table),
+                    sql.SQL(",").join(sql.Identifier(name) for name in columns),
+                    sql.SQL(",").join(sql.Placeholder() for _ in columns)
+                )
+                if table == "bot_settings":
+                    query += sql.SQL(" ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value")
+                elif table in ("users", "bot_admins"):
+                    primary_key = "user_id"
+                    updates = [name for name in columns if name != primary_key]
+                    if updates:
+                        query += sql.SQL(" ON CONFLICT ({}) DO UPDATE SET {}").format(
+                            sql.Identifier(primary_key),
+                            sql.SQL(",").join(
+                                sql.SQL("{}=EXCLUDED.{}").format(
+                                    sql.Identifier(name), sql.Identifier(name)
+                                ) for name in updates
+                            )
+                        )
+                    else:
+                        query += sql.SQL(" ON CONFLICT ({}) DO NOTHING").format(
+                            sql.Identifier(primary_key)
+                        )
+                else:
+                    query += sql.SQL(" ON CONFLICT DO NOTHING")
+                conn.execute(query, [row_data[name] for name in columns])
+                inserted += 1
+            restored[table] = inserted
+
+        serial_tables = (
+            "downloads", "bot_buttons", "bot_ads", "force_join_channels",
+            "admin_logs", "error_logs", "request_events", "user_feedback", "backup_log"
+        )
+        for table in serial_tables:
+            seq = conn.execute(
+                "SELECT pg_get_serial_sequence(%s,'id') AS seq",
+                (f"public.{table}",)
+            ).fetchone()["seq"]
+            if seq:
+                max_id = conn.execute(
+                    sql.SQL("SELECT COALESCE(MAX(id),0) AS n FROM {}").format(
+                        sql.Identifier(table)
+                    )
+                ).fetchone()["n"]
+                if max_id:
+                    conn.execute("SELECT setval(%s,%s,true)", (seq, max_id))
+    return restored
+
+
+async def restore_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    context.user_data["awaiting_restore_upload"] = True
+    context.user_data.pop("pending_restore_payload", None)
+    await update.message.reply_text(
+        "💾 Restore လုပ်မယ့် MediaX JSON Backup File ကို ဒီ Chat ထဲ ပို့ပါ။\\n"
+        "ဖိုင်ကို စစ်ပြီးမှ အတည်ပြုခိုင်းပါမယ်။ လက်ရှိဒေတာကို အလိုအလျောက် မဖျက်ပါ။"
+    )
+
+
+async def restore_document_handler(update, context):
+    if not context.user_data.get("awaiting_restore_upload"):
+        return
+    if not is_owner(update.effective_user.id):
+        context.user_data.pop("awaiting_restore_upload", None)
+        return
+    document = update.message.document
+    filename = (document.file_name or "").lower()
+    if not filename.endswith(".json") or (document.file_size or 0) > 15 * 1024 * 1024:
+        await update.message.reply_text("JSON Backup ဖိုင်သာ ပို့ပါ။ အများဆုံး 15 MB ဖြစ်ရပါမယ်။")
+        return
+    try:
+        tg_file = await context.bot.get_file(document.file_id)
+        raw = bytes(await tg_file.download_as_bytearray())
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict) or not isinstance(payload.get("tables"), dict):
+            raise ValueError("Backup JSON ပုံစံ မမှန်ပါ။")
+        summary = []
+        for table, rows in payload["tables"].items():
+            if table in {
+                "users", "downloads", "bot_settings", "bot_buttons", "bot_ads",
+                "force_join_channels", "bot_admins", "admin_logs", "error_logs",
+                "request_events", "user_feedback", "backup_log"
+            } and isinstance(rows, list):
+                summary.append(f"{table}: {len(rows)}")
+        context.user_data["pending_restore_payload"] = payload
+        context.user_data["awaiting_restore_upload"] = False
+        await update.message.reply_text(
+            "🔎 Backup ဖိုင် စစ်ဆေးပြီးပါပြီ။\\n"
+            + ("\\n".join(summary) or "ပြန်ထည့်နိုင်သော Table မတွေ့ပါ။")
+            + "\\n\\nလက်ရှိဒေတာကို မဖျက်ဘဲ Backup ထဲက record များကို ပေါင်းထည့်/ပြင်ဆင်ပါမယ်။ "
+            "ဆက်လုပ်ရန် /confirmrestore၊ ပယ်ဖျက်ရန် /cancelrestore"
+        )
+    except Exception as exc:
+        context.user_data.pop("pending_restore_payload", None)
+        await update.message.reply_text(f"Backup ဖိုင်ဖတ်မရပါ: {str(exc)[:250]}")
+
+
+async def confirmrestore_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    payload = context.user_data.get("pending_restore_payload")
+    if not payload:
+        await update.message.reply_text("Restore လုပ်ရန် Backup JSON ကို /restore နဲ့ အရင်ပို့ပါ။")
+        return
+    try:
+        restored = restore_backup_payload(payload)
+        context.user_data.pop("pending_restore_payload", None)
+        lines = [f"{name}: {count}" for name, count in restored.items()]
+        log_admin("restore_backup", str(restored), update.effective_user.id)
+        await update.message.reply_text(
+            "✅ Restore ပေါင်းထည့်မှု ပြီးပါပြီ။\\n" + ("\\n".join(lines) or "ပြန်ထည့်စရာ မရှိပါ။")
+        )
+    except Exception as exc:
+        log.exception("Backup restore failed")
+        await update.message.reply_text(f"❌ Restore မအောင်မြင်ပါ။ {str(exc)[:300]}")
+
+
+async def cancelrestore_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    context.user_data.pop("awaiting_restore_upload", None)
+    context.user_data.pop("pending_restore_payload", None)
+    await update.message.reply_text("Restore ပယ်ဖျက်ပြီးပါပြီ။")
+
+
 async def backup_cmd(update, context):
     if not await admin_only(update, context, "backup"): return
     await create_backup(update.effective_chat.id, context, update.effective_user.id)
@@ -2201,6 +2375,10 @@ def main():
     app.add_handler(CommandHandler("togglead", togglead_cmd))
     app.add_handler(CommandHandler("delad", delad_cmd))
     app.add_handler(CommandHandler("backup", backup_cmd))
+    app.add_handler(CommandHandler("restore", restore_cmd))
+    app.add_handler(CommandHandler("confirmrestore", confirmrestore_cmd))
+    app.add_handler(CommandHandler("cancelrestore", cancelrestore_cmd))
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.ChatType.PRIVATE, restore_document_handler))
     app.add_handler(CommandHandler("autobackup", autobackup_cmd))
     app.add_handler(CallbackQueryHandler(callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
