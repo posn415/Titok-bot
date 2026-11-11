@@ -2072,7 +2072,7 @@ async def autobackup_cmd(update, context):
         return
     if not context.args or context.args[0].lower() not in ("on", "off"):
         await update.message.reply_text(
-            "အသုံးပြုရန်: /autobackup on [နာရီ] သို့ /autobackup off\\n"
+            "အသုံးပြုရန်: /autobackup on [နာရီ] သို့ /autobackup off\n"
             "ဥပမာ: /autobackup on 24"
         )
         return
@@ -2191,7 +2191,7 @@ def restore_backup_payload(payload):
                     )
                 ).fetchone()["n"]
                 if max_id:
-                    conn.execute("SELECT setval(%s,%s,true)", (seq, max_id))
+                    conn.execute("SELECT setval(%s::regclass,%s,true)", (seq, max_id))
     return restored
 
 
@@ -2201,7 +2201,7 @@ async def restore_cmd(update, context):
     context.user_data["awaiting_restore_upload"] = True
     context.user_data.pop("pending_restore_payload", None)
     await update.message.reply_text(
-        "💾 Restore လုပ်မယ့် MediaX JSON Backup File ကို ဒီ Chat ထဲ ပို့ပါ။\\n"
+        "💾 Restore လုပ်မယ့် MediaX JSON Backup File ကို ဒီ Chat ထဲ ပို့ပါ။\n"
         "ဖိုင်ကို စစ်ပြီးမှ အတည်ပြုခိုင်းပါမယ်။ လက်ရှိဒေတာကို အလိုအလျောက် မဖျက်ပါ။"
     )
 
@@ -2234,9 +2234,9 @@ async def restore_document_handler(update, context):
         context.user_data["pending_restore_payload"] = payload
         context.user_data["awaiting_restore_upload"] = False
         await update.message.reply_text(
-            "🔎 Backup ဖိုင် စစ်ဆေးပြီးပါပြီ။\\n"
-            + ("\\n".join(summary) or "ပြန်ထည့်နိုင်သော Table မတွေ့ပါ။")
-            + "\\n\\nလက်ရှိဒေတာကို မဖျက်ဘဲ Backup ထဲက record များကို ပေါင်းထည့်/ပြင်ဆင်ပါမယ်။ "
+            "🔎 Backup ဖိုင် စစ်ဆေးပြီးပါပြီ။\n"
+            + ("\n".join(summary) or "ပြန်ထည့်နိုင်သော Table မတွေ့ပါ။")
+            + "\n\nလက်ရှိဒေတာကို မဖျက်ဘဲ Backup ထဲက record များကို ပေါင်းထည့်/ပြင်ဆင်ပါမယ်။ "
             "ဆက်လုပ်ရန် /confirmrestore၊ ပယ်ဖျက်ရန် /cancelrestore"
         )
     except Exception as exc:
@@ -2257,7 +2257,7 @@ async def confirmrestore_cmd(update, context):
         lines = [f"{name}: {count}" for name, count in restored.items()]
         log_admin("restore_backup", str(restored), update.effective_user.id)
         await update.message.reply_text(
-            "✅ Restore ပေါင်းထည့်မှု ပြီးပါပြီ။\\n" + ("\\n".join(lines) or "ပြန်ထည့်စရာ မရှိပါ။")
+            "✅ Restore ပေါင်းထည့်မှု ပြီးပါပြီ။\n" + ("\n".join(lines) or "ပြန်ထည့်စရာ မရှိပါ။")
         )
     except Exception as exc:
         log.exception("Backup restore failed")
