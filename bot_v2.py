@@ -573,6 +573,8 @@ async def to_thread_with_retry(func, *args, attempts=3, **kwargs):
     for attempt in range(1, max(1, attempts) + 1):
         try:
             return await asyncio.to_thread(func, *args, **kwargs)
+        except ValueError:
+            raise
         except Exception as exc:
             last_error = exc
             if attempt >= attempts:
@@ -865,7 +867,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "help":
         await q.edit_message_text(
             "TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။ မရပါက ခဏစောင့်ပြီး ပြန်စမ်းပါ။\n"
-            f"အကူအညီ: @{CONTACT_USERNAME}",
+            f"အကူအညီ: @{CONTACT_USERNAME}\\nFeedback ပေးရန်: /feedback သင့်စာ",
             reply_markup=await main_keyboard()
         )
     elif data == "history":
@@ -1012,8 +1014,10 @@ async def admin_callback(q, context):
             reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_broadcast_help":
-        await q.edit_message_text("Broadcast ပို့ရန် /broadcast စာသား သို့ /broadcastphoto ကို အသုံးပြုပါ။",
-                                  reply_markup=admin_keyboard(q.from_user.id))
+        await q.edit_message_text(
+            "Broadcast ပို့ရန် /broadcast စာသား သို့ /broadcastphoto ကို အသုံးပြုပါ။",
+            reply_markup=admin_keyboard(q.from_user.id)
+        )
     elif action == "adm_ban_help":
         await q.edit_message_text(
             "အသုံးပြုနည်း:\n/ban USER_ID အကြောင်းပြချက်\n"
@@ -1100,6 +1104,11 @@ async def admin_callback(q, context):
         await q.edit_message_text(text or "Error မရှိပါ။", reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_backup":
         await create_backup(q.message.chat_id, context, q.from_user.id)
+        await q.message.reply_text(
+            "Backup ပြန်ယူရန် (Main Admin only): /restore → JSON File ပို့ → /confirmrestore\\n"
+            "Auto Backup ဖွင့်ရန်: /autobackup on 24\\n"
+            "ပိတ်ရန်: /autobackup off"
+        )
     else:
         await q.edit_message_text("မသိသော command", reply_markup=admin_keyboard(q.from_user.id))
 
@@ -1368,25 +1377,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context
         )
         return
-
-    try:
-        data, _media_session = await asyncio.to_thread(get_tiktok_data, url)
-
-        if get_photo_urls(data):
-            await update.message.reply_text("📸 Photo slideshow Download စတင်ပါမယ်။")
-            await process_download(
-                update.effective_chat.id,
-                user.id,
-                user.username,
-                url,
-                "original",
-                "video",
-                context
-            )
-            return
-
-    except Exception:
-        pass
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("720p", callback_data=f"quality:720p:{url}")],
