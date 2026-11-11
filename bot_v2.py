@@ -990,6 +990,7 @@ async def admin_callback(q, context):
             """).fetchall()
         text = f"👥 Users: {total}\nActive (7 days): {active}\n\nTop download users:\n"
         text += "\n".join(f"{r['user_id']} — {r['n']}" for r in top) or "မရှိသေးပါ"
+        text += "\n\nရှာရန်: /finduser USER_ID"
         await q.edit_message_text(text, reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_downloads":
         with db() as conn:
@@ -1006,7 +1007,7 @@ async def admin_callback(q, context):
             f"Maintenance: {setting('maintenance','off')}\n"
             f"Limits: {setting('rate_minute','3')}/min, {setting('rate_hour','20')}/hour, "
             f"{setting('rate_day','100')}/day\n\n"
-            "Commands:\n/maintenance on|off\n/setlimit minute 3\n/setlimit hour 20\n/setlimit day 100",
+            "Commands:\n/maintenance on|off\n/setwelcome ကြိုဆိုစာသား\n/setlimit minute 3\n/setlimit hour 20\n/setlimit day 100",
             reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_broadcast_help":
@@ -1025,7 +1026,10 @@ async def admin_callback(q, context):
             f"{r['id']}. {r['label']} — {'ON' if r['enabled'] else 'OFF'} — {r['url']}"
             for r in rows
         )
-        text += "\n\nထည့်ရန်: /addbutton နာမည် https://URL\nဖျက်ရန်: /delbutton ID"
+        text += "\n\nထည့်ရန်: /addbutton နာမည် https://URL"
+        text += "\nပြင်ရန်: /editbutton ID နာမည် https://URL"
+        text += "\nဖွင့်/ပိတ်ရန်: /togglebutton ID"
+        text += "\nဖျက်ရန်: /delbutton ID"
         await q.edit_message_text(text or "Buttons မရှိသေးပါ။", reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_ads":
         with db() as conn:
@@ -1558,6 +1562,21 @@ async def maintenance_cmd(update, context):
     log_admin("maintenance", context.args[0].lower(), update.effective_user.id)
     await update.message.reply_text("Maintenance " + context.args[0].upper())
 
+async def setwelcome_cmd(update, context):
+    if not await admin_only(update, context, "settings"):
+        return
+    message = " ".join(context.args).strip()
+    if not message:
+        await update.message.reply_text("အသုံးပြုရန်: /setwelcome ကြိုဆိုစာသား")
+        return
+    if len(message) > 3500:
+        await update.message.reply_text("Welcome Message ကို ၃၅၀၀ characters အောက် ထားပါ။")
+        return
+    set_setting("welcome", message)
+    log_admin("set_welcome", message[:150], update.effective_user.id)
+    await update.message.reply_text("✅ Welcome Message ပြင်ပြီးပါပြီ။ /start နဲ့ စမ်းကြည့်ပါ။")
+
+
 async def setlimit_cmd(update, context):
     if not await admin_only(update, context, "settings"): return
     if len(context.args) != 2 or context.args[0] not in ("minute", "hour", "day"):
@@ -1616,6 +1635,38 @@ async def feedback_cmd(update, context):
             (user.id, user.username, message)
         )
     await update.message.reply_text("✅ Feedback ပေးပို့ပြီးပါပြီ။ ကျေးဇူးတင်ပါတယ်။")
+
+
+async def finduser_cmd(update, context):
+    if not await admin_only(update, context, "users"):
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("အသုံးပြုရန်: /finduser USER_ID")
+        return
+    try:
+        uid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("User ID မမှန်ပါ။")
+        return
+    with db() as conn:
+        row = conn.execute(
+            "SELECT user_id,username,first_name,joined_at,last_seen,is_banned,ban_until,ban_reason "
+            "FROM users WHERE user_id=%s",
+            (uid,)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text(f"User {uid} ကို မတွေ့ပါ။")
+        return
+    await update.message.reply_text(
+        f"🔎 User: {row['user_id']}\n"
+        f"Username: @{row['username'] or '—'}\n"
+        f"Name: {row['first_name'] or '—'}\n"
+        f"Joined: {row['joined_at']}\n"
+        f"Last seen: {row['last_seen']}\n"
+        f"Banned: {'Yes' if row['is_banned'] else 'No'}\n"
+        f"Ban until: {row['ban_until'] or 'Permanent / —'}\n"
+        f"Reason: {row['ban_reason'] or '—'}"
+    )
 
 
 async def ban_cmd(update, context):
@@ -1774,6 +1825,57 @@ async def addbutton_cmd(update, context):
         conn.execute("INSERT INTO bot_buttons(label,url) VALUES(%s,%s)", (label, url))
     log_admin("addbutton", label, update.effective_user.id)
     await update.message.reply_text("Button ထည့်ပြီးပါပြီ။ /start ပြန်နှိပ်ကြည့်ပါ။")
+
+async def editbutton_cmd(update, context):
+    if not await admin_only(update, context, "buttons"):
+        return
+    if len(context.args) < 3 or not context.args[-1].startswith(("https://", "http://")):
+        await update.message.reply_text("အသုံးပြုရန်: /editbutton ID Button Name https://URL")
+        return
+    try:
+        bid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Button ID မမှန်ပါ။")
+        return
+    label = " ".join(context.args[1:-1]).strip()
+    url = context.args[-1].strip()
+    if not label or len(label) > 64:
+        await update.message.reply_text("Button Name ကို 1 မှ 64 characters ကြား ထည့်ပါ။")
+        return
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE bot_buttons SET label=%s,url=%s WHERE id=%s RETURNING id",
+            (label, url, bid)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text("Button ID မတွေ့ပါ။")
+        return
+    log_admin("editbutton", f"{bid}: {label}", update.effective_user.id)
+    await update.message.reply_text("Button ပြင်ပြီးပါပြီ။")
+
+
+async def togglebutton_cmd(update, context):
+    if not await admin_only(update, context, "buttons"):
+        return
+    if not context.args:
+        await update.message.reply_text("အသုံးပြုရန်: /togglebutton ID")
+        return
+    try:
+        bid = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Button ID မမှန်ပါ။")
+        return
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE bot_buttons SET enabled=NOT enabled WHERE id=%s RETURNING enabled",
+            (bid,)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text("Button ID မတွေ့ပါ။")
+        return
+    log_admin("togglebutton", f"{bid}: {row['enabled']}", update.effective_user.id)
+    await update.message.reply_text("Button " + ("ON" if row["enabled"] else "OFF") + " ပြောင်းပြီးပါပြီ။")
+
 
 async def delbutton_cmd(update, context):
     if not await admin_only(update, context, "buttons"): return
@@ -2055,7 +2157,7 @@ async def scheduled_backup_loop(app: Application):
                     await create_backup(ADMIN_ID, app, ADMIN_ID, scheduled=True)
         except Exception:
             log.exception("Scheduled backup loop failed")
-        await asyncio.sleep(3600)
+        await asyncio.sleep(300)
 
 
 async def post_init(app: Application):
@@ -2076,6 +2178,8 @@ def main():
     app.add_handler(CommandHandler("findadmin", findadmin_cmd))
     app.add_handler(CommandHandler("maintenance", maintenance_cmd))
     app.add_handler(CommandHandler("setlimit", setlimit_cmd))
+    app.add_handler(CommandHandler("setwelcome", setwelcome_cmd))
+    app.add_handler(CommandHandler("finduser", finduser_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
     app.add_handler(CommandHandler("broadcastphoto", broadcastphoto_cmd))
     app.add_handler(CommandHandler("feedback", feedback_cmd))
@@ -2088,6 +2192,8 @@ def main():
     app.add_handler(CommandHandler("togglechannel", togglechannel_cmd))
     app.add_handler(CommandHandler("addbutton", addbutton_cmd))
     app.add_handler(CommandHandler("delbutton", delbutton_cmd))
+    app.add_handler(CommandHandler("editbutton", editbutton_cmd))
+    app.add_handler(CommandHandler("togglebutton", togglebutton_cmd))
     app.add_handler(CommandHandler("addad", addad_cmd))
     app.add_handler(CommandHandler("savead", savead_cmd))
     app.add_handler(CommandHandler("cancelad", cancelad_cmd))
