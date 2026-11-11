@@ -221,6 +221,8 @@ def log_admin(action, details="", admin_id=None):
         )
 
 def record_user(user):
+    if user is None:
+        return
     with db() as conn:
         conn.execute("""
             INSERT INTO users(user_id,username,first_name,last_seen)
@@ -398,7 +400,6 @@ def get_tiktok_data(url):
                 + r'["\'][^>]*>(.*?)</script>'
             )
             matches = re.findall(pattern, html, re.S | re.I)
-
             for raw in matches:
                 try:
                     page_objects.append(json.loads(raw))
@@ -797,8 +798,7 @@ async def send_ads(chat_id, placement, context):
     for items in grouped.values():
         photo_rows = [item for item in items if item["media_file_id"]]
         if photo_rows:
-            for offset in range(0, len(photo_rows), 10):
-                batch = photo_rows[offset:offset + 10]
+            for offset in range(0, len(photo_rows), 10):                batch = photo_rows[offset:offset + 10]
                 if len(batch) > 1:
                     media = [
                         InputMediaPhoto(
@@ -1197,8 +1197,7 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
                             write_timeout=120
                         )
                     except Exception as download_error:
-                        log.warning(
-                            "Direct download failed, trying Telegram URL: %s",
+                        log.warning(                            "Direct download failed, trying Telegram URL: %s",
                             str(download_error)[:200]
                         )
                         await context.bot.send_video(
@@ -1322,8 +1321,11 @@ user_locks = {}
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    message = update.message
+    if user is None or message is None:
+        return
     record_user(user)
-    text = (update.message.text or "").strip()
+    text = (message.text or "").strip()
 
     match = re.search(
         r"https?://(?:www\.)?(?:vm\.tiktok\.com|vt\.tiktok\.com|tiktok\.com)/\S+",
@@ -1597,8 +1599,7 @@ async def broadcast_cmd(update, context):
     sent = failed = 0
     for uid in ids:
         try:
-            await context.bot.send_message(uid, message)
-            sent += 1
+            await context.bot.send_message(uid, message)            sent += 1
         except Exception:
             failed += 1
         await asyncio.sleep(0.04)
@@ -1997,8 +1998,7 @@ async def togglead_cmd(update, context):
             "SELECT media_group_id FROM bot_ads WHERE id=%s", (aid,)
         ).fetchone()
         if row and row["media_group_id"]:
-            conn.execute(
-                "UPDATE bot_ads SET enabled=NOT enabled WHERE media_group_id=%s",
+            conn.execute(                "UPDATE bot_ads SET enabled=NOT enabled WHERE media_group_id=%s",
                 (row["media_group_id"],)
             )
         elif row:
