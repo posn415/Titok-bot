@@ -1,0 +1,28 @@
+name: MediaX V2 syntax check
+
+on:
+  push:
+    branches:
+      - v2-development
+    paths:
+      - "bot_v2.py"
+      - ".github/workflows/mediax-v2-check.yml"
+  pull_request:
+    branches:
+      - v2-development
+    paths:
+      - "bot_v2.py"
+      - ".github/workflows/mediax-v2-check.yml"
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile MediaX bot
+        run: python -m py_compile bot_v2.py
