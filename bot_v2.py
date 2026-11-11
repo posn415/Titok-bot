@@ -703,21 +703,32 @@ async def main_keyboard():
     return InlineKeyboardMarkup(rows)
 
 def admin_keyboard(uid=None):
-    rows = [
-        [InlineKeyboardButton("📊 Overview", callback_data="adm_stats"),
-         InlineKeyboardButton("👥 User Manager", callback_data="adm_users")],
-        [InlineKeyboardButton("📥 Recent Downloads", callback_data="adm_downloads"),
-         InlineKeyboardButton("⚙️ Settings", callback_data="adm_settings")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast_help"),
-         InlineKeyboardButton("🚫 Ban / Unban", callback_data="adm_ban_help")],
-        [InlineKeyboardButton("🔘 Button Manager", callback_data="adm_buttons"),
-         InlineKeyboardButton("🖼️ Ads Manager", callback_data="adm_ads")],
-        [InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors"),
-         InlineKeyboardButton("💾 Backup", callback_data="adm_backup")],
-        [InlineKeyboardButton("📢 Force Join Channels", callback_data="adm_forcejoin")],
-    ]
+    rows = []
+    if uid is None or has_permission(uid, "dashboard"):
+        rows.append([InlineKeyboardButton("📊 Overview", callback_data="adm_stats")])
+    if uid is None or has_permission(uid, "users"):
+        rows.append([InlineKeyboardButton("👥 User Manager", callback_data="adm_users"),
+                     InlineKeyboardButton("🚫 Ban / Unban", callback_data="adm_ban_help")])
+    if uid is None or has_permission(uid, "downloads"):
+        rows.append([InlineKeyboardButton("📥 Recent Downloads", callback_data="adm_downloads")])
+    if uid is None or has_permission(uid, "settings"):
+        rows.append([InlineKeyboardButton("⚙️ Settings", callback_data="adm_settings")])
+    if uid is None or has_permission(uid, "broadcast"):
+        rows.append([InlineKeyboardButton("📢 Broadcast", callback_data="adm_broadcast_help")])
+    if uid is None or has_permission(uid, "buttons"):
+        rows.append([InlineKeyboardButton("🔘 Button Manager", callback_data="adm_buttons")])
+    if uid is None or has_permission(uid, "ads"):
+        rows.append([InlineKeyboardButton("🖼️ Ads Manager", callback_data="adm_ads")])
+    if uid is None or has_permission(uid, "logs"):
+        rows.append([InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors")])
+    if uid is None or has_permission(uid, "backup"):
+        rows.append([InlineKeyboardButton("💾 Backup", callback_data="adm_backup")])
+    if uid is None or has_permission(uid, "force_join"):
+        rows.append([InlineKeyboardButton("📢 Force Join Channels", callback_data="adm_forcejoin")])
     if uid is not None and is_owner(uid):
         rows.append([InlineKeyboardButton("🛡️ Admin Management", callback_data="adm_admins")])
+    if not rows:
+        rows.append([InlineKeyboardButton("Permission မရှိပါ", callback_data="adm_no_permission")])
     return InlineKeyboardMarkup(rows)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -797,7 +808,7 @@ async def show_history(query):
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
-    if data != "fj_check":
+    if data != "fj_check" and not (data.startswith("admin:") or data.startswith("adm_")):
         await q.answer()
     if data == "fj_check":
         joined, missing = await check_force_join(q.from_user.id, context)
@@ -878,6 +889,7 @@ async def admin_callback(q, context):
     if required_permission and not has_permission(q.from_user.id, required_permission):
         await q.answer("ဒီလုပ်ဆောင်ချက်အတွက် Permission မရှိပါ။", show_alert=True)
         return
+    await q.answer()
     if action == "adm_stats":
         with db() as conn:
             users = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
@@ -1272,6 +1284,7 @@ def parse_admin_permissions(raw):
         raise ValueError("မသိသော Permission: " + ", ".join(sorted(invalid)))
     if not requested:
         raise ValueError("Permission အနည်းဆုံး တစ်ခု ရွေးပါ။")
+    requested.add("dashboard")
     return requested
 
 async def addadmin_cmd(update, context):
