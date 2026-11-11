@@ -1023,7 +1023,7 @@ async def admin_callback(q, context):
     else:
         await q.edit_message_text("မသိသော command", reply_markup=admin_keyboard(q.from_user.id))
 
-async def process_download(chat_id, uid, username, url, quality, kind, context):
+async def _process_download_now(chat_id, uid, username, url, quality, kind, context):
     joined, missing = await check_force_join(uid, context)
     if not joined:
         await send_force_join_prompt(chat_id, missing, context)
@@ -1162,6 +1162,67 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
                 )
             except Exception:
                 pass
+
+
+# In-process download queue. Two jobs can run concurrently; waiting jobs are
+# held in memory and will be lost if the service restarts.
+MAX_CONCURRENT_DOWNLOADS = max(1, min(4, int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "2"))))
+download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
+queue_state_lock = asyncio.Lock()
+queued_downloads = 0
+active_downloads = 0
+
+
+async def process_download(chat_id, uid, username, url, quality, kind, context):
+    global queued_downloads, active_downloads
+    async with queue_state_lock:
+        position = active_downloads + queued_downloads + 1
+        queued_downloads += 1
+
+    progress = None
+    acquired = False
+    waiting = True
+    try:
+        if position > MAX_CONCURRENT_DOWNLOADS:
+            progress = await context.bot.send_message(
+                chat_id,
+                f"⏳ Download Queue ထဲ ထည့်ပြီးပါပြီ။\nသင့်ရှေ့မှာ {position - MAX_CONCURRENT_DOWNLOADS} ခုခန့် ရှိပါတယ်။"
+            )
+        else:
+            progress = await context.bot.send_message(
+                chat_id, "⏳ Download စတင်ရန် ပြင်ဆင်နေပါတယ်။"
+            )
+
+        async with download_semaphore:
+            acquired = True
+            waiting = False
+            async with queue_state_lock:
+                queued_downloads = max(0, queued_downloads - 1)
+                active_downloads += 1
+                active_number = active_downloads
+
+            try:
+                await progress.edit_text(
+                    f"⏳ Download လုပ်နေပါတယ်။\nလက်ရှိလုပ်ဆောင်နေသော Job: {active_number}/{MAX_CONCURRENT_DOWNLOADS}"
+                )
+            except Exception:
+                pass
+
+            await _process_download_now(
+                chat_id, uid, username, url, quality, kind, context
+            )
+            try:
+                await progress.edit_text(
+                    "✅ Request ပြီးဆုံးပါပြီ။ Download ရလဒ်ကို အပေါ်မှာကြည့်ပါ။"
+                )
+            except Exception:
+                pass
+    finally:
+        async with queue_state_lock:
+            if acquired:
+                active_downloads = max(0, active_downloads - 1)
+            elif waiting:
+                queued_downloads = max(0, queued_downloads - 1)
 
 
 user_locks = {}
