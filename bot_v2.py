@@ -1600,7 +1600,8 @@ async def broadcast_cmd(update, context):
     sent = failed = 0
     for uid in ids:
         try:
-            await context.bot.send_message(uid, message)            sent += 1
+            await context.bot.send_message(uid, message)
+            sent += 1
         except Exception:
             failed += 1
         await asyncio.sleep(0.04)
