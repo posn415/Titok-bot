@@ -935,7 +935,7 @@ async def admin_callback(q, context):
                 "SELECT COUNT(*) AS n FROM downloads WHERE status='success'"
             ).fetchone()["n"]
         await q.edit_message_text(
-            f"📊 MediaX Dashboard\\nUsers: {users}\\nDownloads total: {total}\\nToday: {today}\\nLast 7 days: {week}\\nLast 30 days: {month}",
+            f"📊 MediaX Dashboard\nUsers: {users}\nDownloads total: {total}\nToday: {today}\nLast 7 days: {week}\nLast 30 days: {month}",
             reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_system":
@@ -955,11 +955,11 @@ async def admin_callback(q, context):
         except Exception:
             memory_state = "Unavailable"
         await q.edit_message_text(
-            "🖥️ MediaX System Monitor\\n"
-            f"Database: {database_state}\\n"
-            f"Uptime: {hours}h {minutes}m\\n"
-            f"Memory: {memory_state}\\n"
-            f"Downloads active: {active_downloads}/{MAX_CONCURRENT_DOWNLOADS}\\n"
+            "🖥️ MediaX System Monitor\n"
+            f"Database: {database_state}\n"
+            f"Uptime: {hours}h {minutes}m\n"
+            f"Memory: {memory_state}\n"
+            f"Downloads active: {active_downloads}/{MAX_CONCURRENT_DOWNLOADS}\n"
             f"Downloads queued: {queued_downloads}",
             reply_markup=admin_keyboard(q.from_user.id)
         )
@@ -970,8 +970,8 @@ async def admin_callback(q, context):
                 "ORDER BY id DESC LIMIT 10"
             ).fetchall()
         if rows:
-            body = "💬 နောက်ဆုံး Feedback ၁၀ ခု\\n\\n" + "\\n\\n".join(
-                f"#{row['id']} | User {row['user_id']} | {row['status']}\\n"
+            body = "💬 နောက်ဆုံး Feedback ၁၀ ခု\n\n" + "\n\n".join(
+                f"#{row['id']} | User {row['user_id']} | {row['status']}\n"
                 f"{row['message'][:350]}"
                 for row in rows
             )
@@ -1228,12 +1228,12 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
 
             await context.bot.send_message(
                 chat_id,
-                f"❌ Download မအောင်မြင်ပါ။\\n{error[:350]}"
+                f"❌ Download မအောင်မြင်ပါ။\n{error[:350]}"
             )
             try:
                 await context.bot.send_message(
                     ADMIN_ID,
-                    f"⚠️ Download error\\nUser: {uid}\\n{error[:800]}"
+                    f"⚠️ Download error\nUser: {uid}\n{error[:800]}"
                 )
             except Exception:
                 pass
@@ -1931,7 +1931,7 @@ async def delad_cmd(update, context):
 
 async def create_backup(chat_id, context, admin_id=None):
     tables = ["users", "downloads", "bot_settings", "bot_buttons", "bot_ads",
-              "force_join_channels", "admin_logs", "error_logs", "request_events", "backup_log"]
+              "force_join_channels", "admin_logs", "error_logs", "request_events", "user_feedback", "bot_admins", "backup_log"]
     backup = {"created_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
     try:
         with db() as conn:
