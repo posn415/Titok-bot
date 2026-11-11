@@ -130,6 +130,14 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_admins (
+                user_id BIGINT PRIMARY KEY,
+                permissions TEXT NOT NULL DEFAULT 'dashboard,users,downloads,logs',
+                added_by BIGINT NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS admin_logs (
                 id BIGSERIAL PRIMARY KEY,
                 admin_id BIGINT,
@@ -192,11 +200,12 @@ def set_setting(key, value):
             ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value
         """, (key, str(value)))
 
-def log_admin(action, details=""):
+def log_admin(action, details="", admin_id=None):
+    actor_id = ADMIN_ID if admin_id is None else int(admin_id)
     with db() as conn:
         conn.execute(
             "INSERT INTO admin_logs(admin_id,action,details) VALUES(%s,%s,%s)",
-            (ADMIN_ID, action, details)
+            (actor_id, action, details)
         )
 
 def record_user(user):
@@ -229,7 +238,7 @@ def force_join_keyboard(channels):
 
 
 async def check_force_join(uid, context):
-    if uid == ADMIN_ID:
+    if is_admin(uid):
         return True, []
     if setting("force_join_enabled", "off").lower() != "on":
         return True, []
@@ -285,7 +294,7 @@ def user_status(uid):
     return bool(row["is_banned"]), row["ban_reason"] or ""
 
 def check_rate_limit(uid):
-    if uid == ADMIN_ID:
+    if is_admin(uid):
         return True, ""
     with db() as conn:
         row = conn.execute("""
@@ -629,8 +638,48 @@ def extract_mp3(video_bytes):
 # Telegram UI
 # ---------------------------------------------------------------------
 
+ADMIN_PERMISSION_LABELS = {
+    "dashboard": "Dashboard",
+    "users": "User Management",
+    "downloads": "Download Logs",
+    "settings": "Settings / Maintenance",
+    "broadcast": "Broadcast",
+    "buttons": "User Buttons",
+    "ads": "Ads Manager",
+    "force_join": "Force Join",
+    "logs": "Admin / Error Logs",
+    "backup": "Backup",
+}
+
+def is_owner(uid):
+    return int(uid) == ADMIN_ID
+
+def get_admin_permissions(uid):
+    if is_owner(uid):
+        return set(ADMIN_PERMISSION_LABELS) | {"admins"}
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT permissions FROM bot_admins WHERE user_id=%s",
+                (int(uid),)
+            ).fetchone()
+        if not row:
+            return set()
+        return {item.strip() for item in (row["permissions"] or "").split(",") if item.strip()}
+    except Exception:
+        log.exception("Could not read admin permissions for %s", uid)
+        return set()
+
+def has_permission(uid, permission):
+    if is_owner(uid):
+        return True
+    if permission == "admins":
+        return False
+    permissions = get_admin_permissions(uid)
+    return "all" in permissions or permission in permissions
+
 def is_admin(uid):
-    return uid == ADMIN_ID
+    return is_owner(uid) or bool(get_admin_permissions(uid))
 
 async def main_keyboard():
     rows = [
@@ -653,8 +702,8 @@ async def main_keyboard():
         log.exception("Could not load custom start buttons")
     return InlineKeyboardMarkup(rows)
 
-def admin_keyboard():
-    return InlineKeyboardMarkup([
+def admin_keyboard(uid=None):
+    rows = [
         [InlineKeyboardButton("📊 Overview", callback_data="adm_stats"),
          InlineKeyboardButton("👥 User Manager", callback_data="adm_users")],
         [InlineKeyboardButton("📥 Recent Downloads", callback_data="adm_downloads"),
@@ -666,7 +715,10 @@ def admin_keyboard():
         [InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors"),
          InlineKeyboardButton("💾 Backup", callback_data="adm_backup")],
         [InlineKeyboardButton("📢 Force Join Channels", callback_data="adm_forcejoin")],
-    ])
+    ]
+    if uid is not None and is_owner(uid):
+        rows.append([InlineKeyboardButton("🛡️ Admin Management", callback_data="adm_admins")])
+    return InlineKeyboardMarkup(rows)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -686,7 +738,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome, reply_markup=await main_keyboard())
     await send_ads(update.effective_chat.id, "welcome", context)
     if is_admin(user.id):
-        await update.message.reply_text("MediaX Admin Dashboard", reply_markup=admin_keyboard())
+        await update.message.reply_text("MediaX Admin Dashboard", reply_markup=admin_keyboard(user.id))
 
 async def send_ads(chat_id, placement, context):
     with db() as conn:
@@ -808,6 +860,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def admin_callback(q, context):
     action = q.data
+    action_permissions = {
+        "adm_stats": "dashboard",
+        "adm_users": "users",
+        "adm_downloads": "downloads",
+        "adm_settings": "settings",
+        "adm_broadcast_help": "broadcast",
+        "adm_ban_help": "users",
+        "adm_buttons": "buttons",
+        "adm_ads": "ads",
+        "adm_forcejoin": "force_join",
+        "adm_errors": "logs",
+        "adm_backup": "backup",
+        "adm_admins": "admins",
+    }
+    required_permission = action_permissions.get(action)
+    if required_permission and not has_permission(q.from_user.id, required_permission):
+        await q.answer("ဒီလုပ်ဆောင်ချက်အတွက် Permission မရှိပါ။", show_alert=True)
+        return
     if action == "adm_stats":
         with db() as conn:
             users = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
@@ -819,7 +889,7 @@ async def admin_callback(q, context):
             ).fetchone()["n"]
         await q.edit_message_text(
             f"📊 MediaX Dashboard\nUsers: {users}\nDownloads total: {total}\nToday: {today}",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_users":
         with db() as conn:
@@ -833,7 +903,7 @@ async def admin_callback(q, context):
             """).fetchall()
         text = f"👥 Users: {total}\nActive (7 days): {active}\n\nTop download users:\n"
         text += "\n".join(f"{r['user_id']} — {r['n']}" for r in top) or "မရှိသေးပါ"
-        await q.edit_message_text(text, reply_markup=admin_keyboard())
+        await q.edit_message_text(text, reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_downloads":
         with db() as conn:
             rows = conn.execute(
@@ -843,23 +913,23 @@ async def admin_callback(q, context):
             f"{r['user_id']} | {r['media_type']} | {r['status']} | {r['downloaded_at']:%m-%d %H:%M}"
             for r in rows
         )
-        await q.edit_message_text(text, reply_markup=admin_keyboard())
+        await q.edit_message_text(text, reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_settings":
         await q.edit_message_text(
             f"Maintenance: {setting('maintenance','off')}\n"
             f"Limits: {setting('rate_minute','3')}/min, {setting('rate_hour','20')}/hour, "
             f"{setting('rate_day','100')}/day\n\n"
             "Commands:\n/maintenance on|off\n/setlimit minute 3\n/setlimit hour 20\n/setlimit day 100",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_broadcast_help":
         await q.edit_message_text("Broadcast ပို့ရန် /broadcast စာသား ကို အသုံးပြုပါ။",
-                                  reply_markup=admin_keyboard())
+                                  reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_ban_help":
         await q.edit_message_text(
             "အသုံးပြုနည်း:\n/ban USER_ID အကြောင်းပြချက်\n"
             "/tempban USER_ID မိနစ် အကြောင်းပြချက်\n/unban USER_ID",
-            reply_markup=admin_keyboard()
+            reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_buttons":
         with db() as conn:
@@ -869,7 +939,7 @@ async def admin_callback(q, context):
             for r in rows
         )
         text += "\n\nထည့်ရန်: /addbutton နာမည် https://URL\nဖျက်ရန်: /delbutton ID"
-        await q.edit_message_text(text or "Buttons မရှိသေးပါ။", reply_markup=admin_keyboard())
+        await q.edit_message_text(text or "Buttons မရှိသေးပါ။", reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_ads":
         with db() as conn:
             rows = conn.execute(
@@ -884,7 +954,7 @@ async def admin_callback(q, context):
         text += "\n\nစာသား Ad: /addad welcome စာသား\n"
         text += "Photo Album: /addad welcome → ပုံများပို့ → /savead caption\n"
         text += "ဖွင့်/ပိတ်: /togglead ID\nဖျက်ရန်: /delad ID"
-        await q.edit_message_text(text or "Ads မရှိသေးပါ။", reply_markup=admin_keyboard())
+        await q.edit_message_text(text or "Ads မရှိသေးပါ။", reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_forcejoin":
         with db() as conn:
             rows = conn.execute(
@@ -903,18 +973,42 @@ async def admin_callback(q, context):
             "စနစ်ဖွင့်/ပိတ်ရန်: /forcejoin on သို့ /forcejoin off\n\n"
             "မှတ်ချက်: Membership စစ်ဆေးရန် Bot ကို Channel ထဲတွင် Admin ပေးထားပါ။"
         )
-        await q.edit_message_text(text, reply_markup=admin_keyboard())
+        await q.edit_message_text(text, reply_markup=admin_keyboard(q.from_user.id))
+    elif action == "adm_admins":
+        if not is_owner(q.from_user.id):
+            await q.answer("Main Admin သာ အသုံးပြုနိုင်ပါတယ်။", show_alert=True)
+            return
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT user_id,permissions,added_by,created_at FROM bot_admins ORDER BY created_at DESC"
+            ).fetchall()
+        lines = [
+            f"{row['user_id']} — {row['permissions']} (added by {row['added_by']})"
+            for row in rows
+        ]
+        body = (
+            "🛡️ Admin Management\n\n"
+            + ("\n".join(lines) if lines else "Admin အသစ် မရှိသေးပါ။")
+            + "\n\nထည့်ရန်: /addadmin USER_ID permission1,permission2"
+            + "\nPermission ပြင်ရန်: /setadminperm USER_ID permission1,permission2"
+            + "\nဖျက်ရန်: /deladmin USER_ID"
+            + "\nစာရင်း: /admins"
+            + "\n\nPermissions: "
+            + ", ".join(ADMIN_PERMISSION_LABELS.keys())
+            + " (all = Admin Management မပါသော Permission အားလုံး)"
+        )
+        await q.edit_message_text(body, reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_errors":
         with db() as conn:
             rows = conn.execute("SELECT error,created_at FROM error_logs ORDER BY id DESC LIMIT 8").fetchall()
         text = "🧾 Error Logs\n" + "\n".join(
             f"{r['created_at']:%m-%d %H:%M}: {r['error'][:180]}" for r in rows
         )
-        await q.edit_message_text(text or "Error မရှိပါ။", reply_markup=admin_keyboard())
+        await q.edit_message_text(text or "Error မရှိပါ။", reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_backup":
-        await create_backup(q.message.chat_id, context)
+        await create_backup(q.message.chat_id, context, q.from_user.id)
     else:
-        await q.edit_message_text("မသိသော command", reply_markup=admin_keyboard())
+        await q.edit_message_text("မသိသော command", reply_markup=admin_keyboard(q.from_user.id))
 
 async def process_download(chat_id, uid, username, url, quality, kind, context):
     joined, missing = await check_force_join(uid, context)
@@ -922,7 +1016,7 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
         await send_force_join_prompt(chat_id, missing, context)
         return
 
-    if setting("maintenance", "off").lower() == "on" and uid != ADMIN_ID:
+    if setting("maintenance", "off").lower() == "on" and not is_admin(uid):
         await context.bot.send_message(chat_id, "Bot maintenance လုပ်နေပါတယ်။ နောက်မှပြန်စမ်းပါ။")
         return
 
@@ -1153,23 +1247,140 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Admin commands
 # ---------------------------------------------------------------------
 
-async def admin_only(update, context):
-    if not is_admin(update.effective_user.id):
+async def admin_only(update, context, permission="dashboard"):
+    uid = update.effective_user.id
+    if not is_admin(uid):
         await update.message.reply_text("ဒီ command ကို Admin ပဲ သုံးနိုင်ပါတယ်။")
+        return False
+    if not has_permission(uid, permission):
+        await update.message.reply_text("ဒီလုပ်ဆောင်ချက်အတွက် Permission မရှိပါ။")
         return False
     return True
 
+async def owner_only(update, context):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("Main Admin သာ Admin Management လုပ်နိုင်ပါတယ်။")
+        return False
+    return True
+
+def parse_admin_permissions(raw):
+    requested = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    if "all" in requested:
+        return {"all"}
+    invalid = requested - set(ADMIN_PERMISSION_LABELS)
+    if invalid:
+        raise ValueError("မသိသော Permission: " + ", ".join(sorted(invalid)))
+    if not requested:
+        raise ValueError("Permission အနည်းဆုံး တစ်ခု ရွေးပါ။")
+    return requested
+
+async def addadmin_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "အသုံးပြုရန်: /addadmin USER_ID dashboard,users,downloads\n"
+            "Permission များ: " + ", ".join(ADMIN_PERMISSION_LABELS)
+            + "\nall = Admin Management မပါသော Permission အားလုံး"
+        )
+        return
+    try:
+        uid = int(context.args[0])
+        if uid <= 0 or uid == ADMIN_ID:
+            raise ValueError()
+        permissions = parse_admin_permissions(context.args[1])
+    except ValueError as exc:
+        await update.message.reply_text(str(exc) or "User ID မမှန်ပါ။")
+        return
+    permission_text = ",".join(sorted(permissions))
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO bot_admins(user_id,permissions,added_by) VALUES(%s,%s,%s) "
+            "ON CONFLICT(user_id) DO UPDATE SET permissions=EXCLUDED.permissions,added_by=EXCLUDED.added_by",
+            (uid, permission_text, update.effective_user.id)
+        )
+    log_admin("add_or_update_admin", f"{uid}: {permission_text}", update.effective_user.id)
+    await update.message.reply_text(f"Admin {uid} ကို ထည့်/ပြင်ပြီးပါပြီ။ Permission: {permission_text}")
+
+async def setadminperm_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    if len(context.args) != 2:
+        await update.message.reply_text(
+            "အသုံးပြုရန်: /setadminperm USER_ID permission1,permission2"
+        )
+        return
+    try:
+        uid = int(context.args[0])
+        if uid <= 0 or uid == ADMIN_ID:
+            raise ValueError()
+        permissions = parse_admin_permissions(context.args[1])
+    except ValueError as exc:
+        await update.message.reply_text(str(exc) or "User ID မမှန်ပါ။")
+        return
+    permission_text = ",".join(sorted(permissions))
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE bot_admins SET permissions=%s WHERE user_id=%s RETURNING user_id",
+            (permission_text, uid)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text("အဲဒီ Admin ID မတွေ့ပါ။")
+        return
+    log_admin("set_admin_permissions", f"{uid}: {permission_text}", update.effective_user.id)
+    await update.message.reply_text(f"Admin {uid} ရဲ့ Permission ပြင်ပြီးပါပြီ။")
+
+async def deladmin_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    if not context.args:
+        await update.message.reply_text("အသုံးပြုရန်: /deladmin USER_ID")
+        return
+    try:
+        uid = int(context.args[0])
+        if uid <= 0 or uid == ADMIN_ID:
+            raise ValueError()
+    except ValueError:
+        await update.message.reply_text("ဖျက်လို့မရသော ID သို့မဟုတ် ID မမှန်ပါ။")
+        return
+    with db() as conn:
+        row = conn.execute(
+            "DELETE FROM bot_admins WHERE user_id=%s RETURNING user_id",
+            (uid,)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text("အဲဒီ Admin ID မတွေ့ပါ။")
+        return
+    log_admin("remove_admin", str(uid), update.effective_user.id)
+    await update.message.reply_text(f"Admin {uid} ကို ဖယ်ရှားပြီးပါပြီ။")
+
+async def admins_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT user_id,permissions,added_by,created_at FROM bot_admins ORDER BY created_at DESC"
+        ).fetchall()
+    if not rows:
+        await update.message.reply_text("Admin အသစ် မရှိသေးပါ။")
+        return
+    lines = [
+        f"{row['user_id']} — {row['permissions']} (added by {row['added_by']})"
+        for row in rows
+    ]
+    await update.message.reply_text("🛡️ Admin List\n" + "\n".join(lines))
+
 async def maintenance_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "settings"): return
     if not context.args or context.args[0].lower() not in ("on", "off"):
         await update.message.reply_text("အသုံးပြုရန်: /maintenance on သို့ /maintenance off")
         return
     set_setting("maintenance", context.args[0].lower())
-    log_admin("maintenance", context.args[0].lower())
+    log_admin("maintenance", context.args[0].lower(), update.effective_user.id)
     await update.message.reply_text("Maintenance " + context.args[0].upper())
 
 async def setlimit_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "settings"): return
     if len(context.args) != 2 or context.args[0] not in ("minute", "hour", "day"):
         await update.message.reply_text("အသုံးပြုရန်: /setlimit minute 3")
         return
@@ -1180,11 +1391,11 @@ async def setlimit_cmd(update, context):
         await update.message.reply_text("ကန့်သတ်ချက်ကို 1 မှ 10000 ကြား ထည့်ပါ။")
         return
     set_setting("rate_" + context.args[0], value)
-    log_admin("setlimit", f"{context.args[0]}={value}")
+    log_admin("setlimit", f"{context.args[0]}={value}", update.effective_user.id)
     await update.message.reply_text("Rate limit ပြင်ပြီးပါပြီ။")
 
 async def broadcast_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "broadcast"): return
     message = " ".join(context.args).strip()
     if not message:
         await update.message.reply_text("အသုံးပြုရန်: /broadcast သင့်စာသား")
@@ -1199,11 +1410,11 @@ async def broadcast_cmd(update, context):
         except Exception:
             failed += 1
         await asyncio.sleep(0.04)
-    log_admin("broadcast", f"sent={sent},failed={failed}")
+    log_admin("broadcast", f"sent={sent},failed={failed}", update.effective_user.id)
     await update.message.reply_text(f"Broadcast ပြီးပါပြီ။ Success: {sent}, Failed: {failed}")
 
 async def ban_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "users"): return
     if not context.args:
         await update.message.reply_text("အသုံးပြုရန်: /ban USER_ID အကြောင်းပြချက်")
         return
@@ -1214,11 +1425,11 @@ async def ban_cmd(update, context):
     with db() as conn:
         conn.execute("UPDATE users SET is_banned=TRUE,ban_until=NULL,ban_reason=%s WHERE user_id=%s",
                      (reason, uid))
-    log_admin("ban", f"{uid}: {reason}")
+    log_admin("ban", f"{uid}: {reason}", update.effective_user.id)
     await update.message.reply_text(f"{uid} ကို ban လုပ်ပြီးပါပြီ။")
 
 async def tempban_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "users"): return
     if len(context.args) < 2:
         await update.message.reply_text("အသုံးပြုရန်: /tempban USER_ID မိနစ် အကြောင်းပြချက်"); return
     try:
@@ -1232,11 +1443,11 @@ async def tempban_cmd(update, context):
             UPDATE users SET is_banned=TRUE,ban_until=NOW()+(%s * INTERVAL '1 minute'),
             ban_reason=%s WHERE user_id=%s
         """, (minutes, reason, uid))
-    log_admin("tempban", f"{uid} for {minutes}m")
+    log_admin("tempban", f"{uid} for {minutes}m", update.effective_user.id)
     await update.message.reply_text(f"{uid} ကို {minutes} မိနစ် ban လုပ်ပြီးပါပြီ။")
 
 async def unban_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "users"): return
     if not context.args:
         await update.message.reply_text("အသုံးပြုရန်: /unban USER_ID"); return
     try: uid = int(context.args[0])
@@ -1245,23 +1456,23 @@ async def unban_cmd(update, context):
     with db() as conn:
         conn.execute("UPDATE users SET is_banned=FALSE,ban_until=NULL,ban_reason=NULL WHERE user_id=%s",
                      (uid,))
-    log_admin("unban", str(uid))
+    log_admin("unban", str(uid), update.effective_user.id)
     await update.message.reply_text(f"{uid} ကို unban လုပ်ပြီးပါပြီ။")
 
 async def forcejoin_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "force_join"):
         return
     if not context.args or context.args[0].lower() not in ("on", "off"):
         await update.message.reply_text("အသုံးပြုရန်: /forcejoin on သို့ /forcejoin off")
         return
     value = context.args[0].lower()
     set_setting("force_join_enabled", value)
-    log_admin("forcejoin", value)
+    log_admin("forcejoin", value, update.effective_user.id)
     await update.message.reply_text(f"Force Join {value.upper()} ပြီးပါပြီ။")
 
 
 async def addchannel_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "force_join"):
         return
     if len(context.args) != 2:
         await update.message.reply_text(
@@ -1294,14 +1505,14 @@ async def addchannel_cmd(update, context):
             "INSERT INTO force_join_channels(channel,invite_url) VALUES(%s,%s)",
             (channel, invite_url)
         )
-    log_admin("add_force_join_channel", channel)
+    log_admin("add_force_join_channel", channel, update.effective_user.id)
     await update.message.reply_text(
         "Channel ထည့်ပြီးပါပြီ။ /forcejoin on လုပ်ပြီး အသုံးပြုနိုင်ပါပြီ။"
     )
 
 
 async def delchannel_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "force_join"):
         return
     if not context.args:
         await update.message.reply_text("အသုံးပြုရန်: /delchannel ID")
@@ -1316,14 +1527,14 @@ async def delchannel_cmd(update, context):
             "DELETE FROM force_join_channels WHERE id=%s RETURNING id",
             (channel_id,)
         ).fetchone()
-    log_admin("delete_force_join_channel", str(channel_id))
+    log_admin("delete_force_join_channel", str(channel_id), update.effective_user.id)
     await update.message.reply_text(
         "Channel ဖျက်ပြီးပါပြီ။" if result else "အဲဒီ ID မတွေ့ပါ။"
     )
 
 
 async def togglechannel_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "force_join"):
         return
     if not context.args:
         await update.message.reply_text("အသုံးပြုရန်: /togglechannel ID")
@@ -1342,34 +1553,34 @@ async def togglechannel_cmd(update, context):
     if not row:
         await update.message.reply_text("အဲဒီ Channel ID မတွေ့ပါ။")
         return
-    log_admin("toggle_force_join_channel", f"{channel_id}: {row['enabled']}")
+    log_admin("toggle_force_join_channel", f"{channel_id}: {row['enabled']}", update.effective_user.id)
     await update.message.reply_text(
         "Channel ကို " + ("ON" if row["enabled"] else "OFF") + " ပြောင်းပြီးပါပြီ။"
     )
 
 
 async def addbutton_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "buttons"): return
     if len(context.args) < 2 or not context.args[-1].startswith("https://"):
         await update.message.reply_text("အသုံးပြုရန်: /addbutton Button Name https://URL"); return
     label = " ".join(context.args[:-1])
     url = context.args[-1]
     with db() as conn:
         conn.execute("INSERT INTO bot_buttons(label,url) VALUES(%s,%s)", (label, url))
-    log_admin("addbutton", label)
+    log_admin("addbutton", label, update.effective_user.id)
     await update.message.reply_text("Button ထည့်ပြီးပါပြီ။ /start ပြန်နှိပ်ကြည့်ပါ။")
 
 async def delbutton_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "buttons"): return
     if not context.args: await update.message.reply_text("အသုံးပြုရန်: /delbutton ID"); return
     try: bid = int(context.args[0])
     except ValueError: await update.message.reply_text("ID မမှန်ပါ။"); return
     with db() as conn: conn.execute("DELETE FROM bot_buttons WHERE id=%s", (bid,))
-    log_admin("delbutton", str(bid))
+    log_admin("delbutton", str(bid), update.effective_user.id)
     await update.message.reply_text("Button ဖျက်ပြီးပါပြီ။")
 
 async def addad_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "ads"):
         return
     if not context.args:
         await update.message.reply_text(
@@ -1395,12 +1606,12 @@ async def addad_cmd(update, context):
             "INSERT INTO bot_ads(placement,text) VALUES(%s,%s)",
             (placement, message)
         )
-    log_admin("addad_text", placement)
+    log_admin("addad_text", placement, update.effective_user.id)
     await update.message.reply_text("စာသား Ad ထည့်ပြီးပါပြီ။")
 
 
 async def handle_ad_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not has_permission(update.effective_user.id, "ads"):
         return
     placement = context.user_data.get("pending_ad_placement")
     if not placement:
@@ -1419,7 +1630,7 @@ async def handle_ad_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def savead_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "ads"):
         return
     placement = context.user_data.get("pending_ad_placement")
     photos = context.user_data.get("pending_ad_photos", [])
@@ -1435,7 +1646,7 @@ async def savead_cmd(update, context):
                 "VALUES(%s,%s,%s,%s)",
                 (placement, caption, file_id, group_id)
             )
-    log_admin("addad_photos", f"{placement}: {len(photos)} photos")
+    log_admin("addad_photos", f"{placement}: {len(photos)} photos", update.effective_user.id)
     context.user_data.pop("pending_ad_placement", None)
     context.user_data.pop("pending_ad_photos", None)
     context.user_data.pop("pending_ad_caption", None)
@@ -1443,7 +1654,7 @@ async def savead_cmd(update, context):
 
 
 async def cancelad_cmd(update, context):
-    if not await admin_only(update, context):
+    if not await admin_only(update, context, "ads"):
         return
     context.user_data.pop("pending_ad_placement", None)
     context.user_data.pop("pending_ad_photos", None)
@@ -1451,7 +1662,7 @@ async def cancelad_cmd(update, context):
     await update.message.reply_text("Photo Ad ပြင်ဆင်မှု ပယ်ဖျက်ပြီးပါပြီ။")
 
 async def togglead_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "ads"): return
     if not context.args: await update.message.reply_text("အသုံးပြုရန်: /togglead ID"); return
     try: aid = int(context.args[0])
     except ValueError: await update.message.reply_text("ID မမှန်ပါ။"); return
@@ -1466,11 +1677,11 @@ async def togglead_cmd(update, context):
             )
         elif row:
             conn.execute("UPDATE bot_ads SET enabled=NOT enabled WHERE id=%s", (aid,))
-    log_admin("togglead", str(aid))
+    log_admin("togglead", str(aid), update.effective_user.id)
     await update.message.reply_text("Ad အခြေအနေ ပြောင်းပြီးပါပြီ။")
 
 async def delad_cmd(update, context):
-    if not await admin_only(update, context): return
+    if not await admin_only(update, context, "ads"): return
     if not context.args: await update.message.reply_text("အသုံးပြုရန်: /delad ID"); return
     try: aid = int(context.args[0])
     except ValueError: await update.message.reply_text("ID မမှန်ပါ။"); return
@@ -1485,10 +1696,10 @@ async def delad_cmd(update, context):
             )
         elif row:
             conn.execute("DELETE FROM bot_ads WHERE id=%s", (aid,))
-    log_admin("delad", str(aid))
+    log_admin("delad", str(aid), update.effective_user.id)
     await update.message.reply_text("Ad ဖျက်ပြီးပါပြီ။")
 
-async def create_backup(chat_id, context):
+async def create_backup(chat_id, context, admin_id=None):
     tables = ["users", "downloads", "bot_settings", "bot_buttons", "bot_ads",
               "force_join_channels", "admin_logs", "error_logs", "request_events", "backup_log"]
     backup = {"created_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
@@ -1506,19 +1717,22 @@ async def create_backup(chat_id, context):
         await context.bot.send_document(chat_id, file, caption="MediaX Database Backup (JSON)")
         with db() as conn:
             conn.execute("INSERT INTO backup_log(status,details) VALUES('success','Manual backup sent')")
-        log_admin("backup", "manual success")
+        log_admin("backup", "manual success", admin_id)
     except Exception as exc:
         with db() as conn:
             conn.execute("INSERT INTO backup_log(status,details) VALUES('failed',%s)", (str(exc)[:1000],))
         await context.bot.send_message(chat_id, f"Backup မအောင်မြင်ပါ: {str(exc)[:300]}")
 
 async def backup_cmd(update, context):
-    if not await admin_only(update, context): return
-    await create_backup(update.effective_chat.id, context)
+    if not await admin_only(update, context, "backup"): return
+    await create_backup(update.effective_chat.id, context, update.effective_user.id)
 
 async def admin_command(update, context):
-    if not await admin_only(update, context): return
-    await update.message.reply_text("MediaX Admin Dashboard", reply_markup=admin_keyboard())
+    if not await admin_only(update, context, "dashboard"): return
+    await update.message.reply_text(
+        "MediaX Admin Dashboard",
+        reply_markup=admin_keyboard(update.effective_user.id)
+    )
 
 async def error_handler(update, context):
     # Telegram raises this harmless error when an edit repeats identical text/markup.
@@ -1561,6 +1775,10 @@ def main():
     app = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_command))
+    app.add_handler(CommandHandler("addadmin", addadmin_cmd))
+    app.add_handler(CommandHandler("setadminperm", setadminperm_cmd))
+    app.add_handler(CommandHandler("deladmin", deladmin_cmd))
+    app.add_handler(CommandHandler("admins", admins_cmd))
     app.add_handler(CommandHandler("maintenance", maintenance_cmd))
     app.add_handler(CommandHandler("setlimit", setlimit_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
