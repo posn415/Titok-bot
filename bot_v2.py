@@ -1116,26 +1116,26 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
     joined, missing = await check_force_join(uid, context)
     if not joined:
         await send_force_join_prompt(chat_id, missing, context)
-        return
+        return False
 
     if setting("maintenance", "off").lower() == "on" and not is_admin(uid):
         await context.bot.send_message(chat_id, "Bot maintenance လုပ်နေပါတယ်။ နောက်မှပြန်စမ်းပါ။")
-        return
+        return False
 
     banned, reason = user_status(uid)
     if banned:
         await context.bot.send_message(chat_id, "အသုံးပြုခွင့် ပိတ်ထားပါတယ်။ " + reason)
-        return
+        return False
 
     allowed, message = check_rate_limit(uid)
     if not allowed:
         await context.bot.send_message(chat_id, message)
-        return
+        return False
 
     lock = user_locks.setdefault(uid, asyncio.Lock())
     if lock.locked():
         await context.bot.send_message(chat_id, "Download တစ်ခု လုပ်နေဆဲပါ။ ပြီးမှ ထပ်လုပ်ပါ။")
-        return
+        return False
 
     async with lock:
         try:
@@ -1222,6 +1222,7 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
                 reply_markup=await main_keyboard()
             )
             await send_ads(chat_id, "after_download", context)
+            return True
 
         except Exception as exc:
             log.exception("Download failed for %s", uid)
@@ -1251,6 +1252,7 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
                 )
             except Exception:
                 pass
+            return False
 
 
 # In-process download queue. Two jobs can run concurrently; waiting jobs are
@@ -1297,12 +1299,13 @@ async def process_download(chat_id, uid, username, url, quality, kind, context):
             except Exception:
                 pass
 
-            await _process_download_now(
+            succeeded = await _process_download_now(
                 chat_id, uid, username, url, quality, kind, context
             )
             try:
                 await progress.edit_text(
-                    "✅ Request ပြီးဆုံးပါပြီ။ Download ရလဒ်ကို အပေါ်မှာကြည့်ပါ။"
+                    "✅ Download ပြီးဆုံးပါပြီ။" if succeeded
+                    else "⚠️ Request ပြီးဆုံးပါပြီ။ အပေါ်က အကြောင်းကြားစာကို ကြည့်ပါ။"
                 )
             except Exception:
                 pass
