@@ -41,6 +41,7 @@ CONTACT_USERNAME = os.getenv("CONTACT_USERNAME", "P_digital3").lstrip("@")
 API_URL = "https://tikwm.com/api/"
 RATE_LIMITS = {"minute": 3, "hour": 20, "day": 100}
 QUALITY_OPTIONS = ("720p", "1080p", "original")
+STARTED_AT = time.monotonic()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -159,6 +160,16 @@ def init_db():
                 id BIGSERIAL PRIMARY KEY,
                 status TEXT,
                 details TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_feedback (
+                id BIGSERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                username TEXT,
+                message TEXT NOT NULL,
+                status TEXT DEFAULT 'new',
                 created_at TIMESTAMPTZ DEFAULT NOW()
             )
         """)
@@ -555,6 +566,20 @@ def fetch_bytes(session, url):
     return data
 
 
+async def to_thread_with_retry(func, *args, attempts=3, **kwargs):
+    """Retry transient worker/network errors with a short exponential backoff."""
+    last_error = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            return await asyncio.to_thread(func, *args, **kwargs)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts:
+                break
+            await asyncio.sleep(min(2 ** (attempt - 1), 4))
+    raise last_error
+
+
 def get_photo_urls(data):
     images = data.get("images") or []
     urls = []
@@ -705,7 +730,8 @@ async def main_keyboard():
 def admin_keyboard(uid=None):
     rows = []
     if uid is None or has_permission(uid, "dashboard"):
-        rows.append([InlineKeyboardButton("📊 Overview", callback_data="adm_stats")])
+        rows.append([InlineKeyboardButton("📊 Overview", callback_data="adm_stats"),
+                     InlineKeyboardButton("🖥️ System Monitor", callback_data="adm_system")])
     if uid is None or has_permission(uid, "users"):
         rows.append([InlineKeyboardButton("👥 User Manager", callback_data="adm_users"),
                      InlineKeyboardButton("🚫 Ban / Unban", callback_data="adm_ban_help")])
@@ -720,7 +746,8 @@ def admin_keyboard(uid=None):
     if uid is None or has_permission(uid, "ads"):
         rows.append([InlineKeyboardButton("🖼️ Ads Manager", callback_data="adm_ads")])
     if uid is None or has_permission(uid, "logs"):
-        rows.append([InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors")])
+        rows.append([InlineKeyboardButton("🧾 Error Logs", callback_data="adm_errors"),
+                     InlineKeyboardButton("💬 User Feedback", callback_data="adm_feedback")])
     if uid is None or has_permission(uid, "backup"):
         rows.append([InlineKeyboardButton("💾 Backup", callback_data="adm_backup")])
     if uid is None or has_permission(uid, "force_join"):
@@ -873,6 +900,8 @@ async def admin_callback(q, context):
     action = q.data
     action_permissions = {
         "adm_stats": "dashboard",
+        "adm_system": "dashboard",
+        "adm_feedback": "logs",
         "adm_users": "users",
         "adm_downloads": "downloads",
         "adm_settings": "settings",
@@ -896,13 +925,59 @@ async def admin_callback(q, context):
             today = conn.execute(
                 "SELECT COUNT(*) AS n FROM downloads WHERE downloaded_at::date=CURRENT_DATE AND status='success'"
             ).fetchone()["n"]
+            week = conn.execute(
+                "SELECT COUNT(*) AS n FROM downloads WHERE downloaded_at >= NOW()-INTERVAL '7 days' AND status='success'"
+            ).fetchone()["n"]
+            month = conn.execute(
+                "SELECT COUNT(*) AS n FROM downloads WHERE downloaded_at >= NOW()-INTERVAL '30 days' AND status='success'"
+            ).fetchone()["n"]
             total = conn.execute(
                 "SELECT COUNT(*) AS n FROM downloads WHERE status='success'"
             ).fetchone()["n"]
         await q.edit_message_text(
-            f"📊 MediaX Dashboard\nUsers: {users}\nDownloads total: {total}\nToday: {today}",
+            f"📊 MediaX Dashboard\\nUsers: {users}\\nDownloads total: {total}\\nToday: {today}\\nLast 7 days: {week}\\nLast 30 days: {month}",
             reply_markup=admin_keyboard(q.from_user.id)
         )
+    elif action == "adm_system":
+        try:
+            with db() as conn:
+                conn.execute("SELECT 1")
+            database_state = "OK"
+        except Exception as exc:
+            database_state = "ERROR: " + str(exc)[:120]
+        uptime_seconds = int(time.monotonic() - STARTED_AT)
+        hours, remainder = divmod(uptime_seconds, 3600)
+        minutes = remainder // 60
+        try:
+            with open("/proc/self/status", "r", encoding="utf-8") as status_file:
+                rss_line = next((line for line in status_file if line.startswith("VmRSS:")), "")
+            memory_state = rss_line.replace("VmRSS:", "").strip() or "Unavailable"
+        except Exception:
+            memory_state = "Unavailable"
+        await q.edit_message_text(
+            "🖥️ MediaX System Monitor\\n"
+            f"Database: {database_state}\\n"
+            f"Uptime: {hours}h {minutes}m\\n"
+            f"Memory: {memory_state}\\n"
+            f"Downloads active: {active_downloads}/{MAX_CONCURRENT_DOWNLOADS}\\n"
+            f"Downloads queued: {queued_downloads}",
+            reply_markup=admin_keyboard(q.from_user.id)
+        )
+    elif action == "adm_feedback":
+        with db() as conn:
+            rows = conn.execute(
+                "SELECT id,user_id,username,message,status,created_at FROM user_feedback "
+                "ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+        if rows:
+            body = "💬 နောက်ဆုံး Feedback ၁၀ ခု\\n\\n" + "\\n\\n".join(
+                f"#{row['id']} | User {row['user_id']} | {row['status']}\\n"
+                f"{row['message'][:350]}"
+                for row in rows
+            )
+        else:
+            body = "Feedback မရှိသေးပါ။"
+        await q.edit_message_text(body, reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_users":
         with db() as conn:
             total = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
@@ -935,7 +1010,7 @@ async def admin_callback(q, context):
             reply_markup=admin_keyboard(q.from_user.id)
         )
     elif action == "adm_broadcast_help":
-        await q.edit_message_text("Broadcast ပို့ရန် /broadcast စာသား ကို အသုံးပြုပါ။",
+        await q.edit_message_text("Broadcast ပို့ရန် /broadcast စာသား သို့ /broadcastphoto ကို အသုံးပြုပါ။",
                                   reply_markup=admin_keyboard(q.from_user.id))
     elif action == "adm_ban_help":
         await q.edit_message_text(
@@ -1067,12 +1142,12 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
                     raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
                 for photo_url in photos:
                     photo_bytes.append(
-                        await asyncio.to_thread(fetch_bytes, media_session, photo_url)
+                        await to_thread_with_retry(fetch_bytes, media_session, photo_url)
                     )
             elif "/photo/" in url:
                 if kind == "mp3":
                     raise ValueError("Photo slideshow မှ MP3 မထုတ်နိုင်ပါ။")
-                photo_bytes = await get_tiktok_photos(url)
+                photo_bytes = await to_thread_with_retry(download_tiktok_photos, url)
 
             if photo_bytes:
                 for index, photo in enumerate(photo_bytes, start=1):
@@ -1089,7 +1164,7 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
 
                 video_url = choose_video_url(data, quality)
                 if kind == "mp3":
-                    video_bytes = await asyncio.to_thread(fetch_bytes, media_session, video_url)
+                    video_bytes = await to_thread_with_retry(fetch_bytes, media_session, video_url)
                     audio = await asyncio.to_thread(extract_mp3, video_bytes)
                     audio_file = BytesIO(audio)
                     audio_file.name = "tiktok_audio.mp3"
@@ -1097,7 +1172,7 @@ async def _process_download_now(chat_id, uid, username, url, quality, kind, cont
                     media_type = "mp3"
                 else:
                     try:
-                        video_bytes = await asyncio.to_thread(fetch_bytes, media_session, video_url)
+                        video_bytes = await to_thread_with_retry(fetch_bytes, media_session, video_url)
                         video_file = BytesIO(video_bytes)
                         video_file.name = "tiktok_video.mp4"
                         await context.bot.send_video(
@@ -1517,6 +1592,32 @@ async def broadcast_cmd(update, context):
     log_admin("broadcast", f"sent={sent},failed={failed}", update.effective_user.id)
     await update.message.reply_text(f"Broadcast ပြီးပါပြီ။ Success: {sent}, Failed: {failed}")
 
+async def broadcastphoto_cmd(update, context):
+    if not await admin_only(update, context, "broadcast"):
+        return
+    context.user_data["pending_broadcast_photo"] = True
+    await update.message.reply_text(
+        "📷 Broadcast ပို့မယ့် Photo ကို ပို့ပါ။ Caption ထည့်နိုင်ပါတယ်။ ပုံတစ်ပုံ ပို့ပြီးတာနဲ့ User အားလုံးဆီ ပို့ပါမယ်။"
+    )
+
+
+async def feedback_cmd(update, context):
+    user = update.effective_user
+    message = " ".join(context.args).strip()
+    if not message:
+        await update.message.reply_text("အသုံးပြုရန်: /feedback သင့်အကြံပြုချက် သို့မဟုတ် ပြဿနာ")
+        return
+    if len(message) > 1500:
+        await update.message.reply_text("Feedback ကို စာလုံး ၁၅၀၀ အောက် ထားပေးပါ။")
+        return
+    with db() as conn:
+        conn.execute(
+            "INSERT INTO user_feedback(user_id,username,message) VALUES(%s,%s,%s)",
+            (user.id, user.username, message)
+        )
+    await update.message.reply_text("✅ Feedback ပေးပို့ပြီးပါပြီ။ ကျေးဇူးတင်ပါတယ်။")
+
+
 async def ban_cmd(update, context):
     if not await admin_only(update, context, "users"): return
     if not context.args:
@@ -1715,6 +1816,31 @@ async def addad_cmd(update, context):
 
 
 async def handle_ad_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("pending_broadcast_photo"):
+        if not has_permission(update.effective_user.id, "broadcast"):
+            context.user_data.pop("pending_broadcast_photo", None)
+            return
+        file_id = update.message.photo[-1].file_id
+        caption = update.message.caption or ""
+        with db() as conn:
+            ids = [row["user_id"] for row in conn.execute(
+                "SELECT user_id FROM users WHERE is_banned=FALSE"
+            ).fetchall()]
+        sent = failed = 0
+        for uid in ids:
+            try:
+                await context.bot.send_photo(uid, photo=file_id, caption=caption[:1024] or None)
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.04)
+        context.user_data.pop("pending_broadcast_photo", None)
+        log_admin("broadcast_photo", f"sent={sent},failed={failed}", update.effective_user.id)
+        await update.message.reply_text(
+            f"📷 Photo Broadcast ပြီးပါပြီ။ Success: {sent}, Failed: {failed}"
+        )
+        return
+
     if not has_permission(update.effective_user.id, "ads"):
         return
     placement = context.user_data.get("pending_ad_placement")
@@ -1887,6 +2013,8 @@ def main():
     app.add_handler(CommandHandler("maintenance", maintenance_cmd))
     app.add_handler(CommandHandler("setlimit", setlimit_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
+    app.add_handler(CommandHandler("broadcastphoto", broadcastphoto_cmd))
+    app.add_handler(CommandHandler("feedback", feedback_cmd))
     app.add_handler(CommandHandler("ban", ban_cmd))
     app.add_handler(CommandHandler("tempban", tempban_cmd))
     app.add_handler(CommandHandler("unban", unban_cmd))
