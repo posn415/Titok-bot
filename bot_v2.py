@@ -1005,6 +1005,7 @@ async def admin_callback(q, context):
             + "\nPermission ပြင်ရန်: /setadminperm USER_ID permission1,permission2"
             + "\nဖျက်ရန်: /deladmin USER_ID"
             + "\nစာရင်း: /admins"
+            + "\nID နဲ့ရှာရန်: /findadmin USER_ID"
             + "\n\nPermissions: "
             + ", ".join(ADMIN_PERMISSION_LABELS.keys())
             + " (all = Admin Management မပါသော Permission အားလုံး)"
@@ -1382,6 +1383,35 @@ async def admins_cmd(update, context):
         for row in rows
     ]
     await update.message.reply_text("🛡️ Admin List\n" + "\n".join(lines))
+
+async def findadmin_cmd(update, context):
+    if not await owner_only(update, context):
+        return
+    if len(context.args) != 1:
+        await update.message.reply_text("အသုံးပြုရန်: /findadmin USER_ID")
+        return
+    try:
+        uid = int(context.args[0])
+        if uid <= 0:
+            raise ValueError()
+    except ValueError:
+        await update.message.reply_text("User ID မမှန်ပါ။")
+        return
+    with db() as conn:
+        row = conn.execute(
+            "SELECT user_id,permissions,added_by,created_at FROM bot_admins WHERE user_id=%s",
+            (uid,)
+        ).fetchone()
+    if not row:
+        await update.message.reply_text(f"Admin {uid} ကို မတွေ့ပါ။")
+        return
+    await update.message.reply_text(
+        "🔎 Admin ရှာဖွေမှု\n"
+        f"ID: {row['user_id']}\n"
+        f"Permission: {row['permissions']}\n"
+        f"Added by: {row['added_by']}\n"
+        f"Added at: {row['created_at']}"
+    )
 
 async def maintenance_cmd(update, context):
     if not await admin_only(update, context, "settings"): return
@@ -1792,6 +1822,7 @@ def main():
     app.add_handler(CommandHandler("setadminperm", setadminperm_cmd))
     app.add_handler(CommandHandler("deladmin", deladmin_cmd))
     app.add_handler(CommandHandler("admins", admins_cmd))
+    app.add_handler(CommandHandler("findadmin", findadmin_cmd))
     app.add_handler(CommandHandler("maintenance", maintenance_cmd))
     app.add_handler(CommandHandler("setlimit", setlimit_cmd))
     app.add_handler(CommandHandler("broadcast", broadcast_cmd))
