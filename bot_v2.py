@@ -2048,7 +2048,8 @@ async def create_backup(chat_id, context, admin_id=None, scheduled=False):
                 ("scheduled_success" if scheduled else "success",
                  "Scheduled backup sent" if scheduled else "Manual backup sent")
             )
-        log_admin("backup", "manual success", admin_id)
+        log_admin("scheduled_backup" if scheduled else "backup",
+                  "scheduled success" if scheduled else "manual success", admin_id)
     except Exception as exc:
         with db() as conn:
             conn.execute(
@@ -2311,7 +2312,7 @@ async def scheduled_backup_loop(app: Application):
                 hours = max(1, min(168, int(setting("backup_interval_hours", "24"))))
                 with db() as conn:
                     last = conn.execute(
-                        "SELECT created_at FROM backup_log WHERE status='scheduled_success' "
+                        "SELECT created_at FROM backup_log WHERE status IN ('scheduled_success','scheduled_failed') "
                         "ORDER BY id DESC LIMIT 1"
                     ).fetchone()
                 due = not last or (
