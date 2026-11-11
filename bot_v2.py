@@ -865,7 +865,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                url, quality, kind, context)
     elif data.startswith("admin:") or data.startswith("adm_"):
         if not is_admin(q.from_user.id):
-            await q.edit_message_text("Admin only.")
+            await q.answer("Admin only.", show_alert=True)
             return
         await admin_callback(q, context)
 
