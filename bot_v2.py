@@ -798,7 +798,8 @@ async def send_ads(chat_id, placement, context):
     for items in grouped.values():
         photo_rows = [item for item in items if item["media_file_id"]]
         if photo_rows:
-            for offset in range(0, len(photo_rows), 10):                batch = photo_rows[offset:offset + 10]
+            for offset in range(0, len(photo_rows), 10):
+                batch = photo_rows[offset:offset + 10]
                 if len(batch) > 1:
                     media = [
                         InputMediaPhoto(
