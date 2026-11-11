@@ -867,7 +867,7 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "help":
         await q.edit_message_text(
             "TikTok link ပို့ပြီး Download လုပ်နိုင်ပါတယ်။ မရပါက ခဏစောင့်ပြီး ပြန်စမ်းပါ။\n"
-            f"အကူအညီ: @{CONTACT_USERNAME}\\nFeedback ပေးရန်: /feedback သင့်စာ",
+            f"အကူအညီ: @{CONTACT_USERNAME}\nFeedback ပေးရန်: /feedback သင့်စာ",
             reply_markup=await main_keyboard()
         )
     elif data == "history":
@@ -1105,8 +1105,8 @@ async def admin_callback(q, context):
     elif action == "adm_backup":
         await create_backup(q.message.chat_id, context, q.from_user.id)
         await q.message.reply_text(
-            "Backup ပြန်ယူရန် (Main Admin only): /restore → JSON File ပို့ → /confirmrestore\\n"
-            "Auto Backup ဖွင့်ရန်: /autobackup on 24\\n"
+            "Backup ပြန်ယူရန် (Main Admin only): /restore → JSON File ပို့ → /confirmrestore\n"
+            "Auto Backup ဖွင့်ရန်: /autobackup on 24\n"
             "ပိတ်ရန်: /autobackup off"
         )
     else:
