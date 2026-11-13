@@ -15,7 +15,7 @@ from psycopg import sql
 from psycopg.rows import dict_row
 from flask import Flask, jsonify
 from curl_cffi import requests as c_requests
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto
 )
@@ -2280,9 +2280,23 @@ async def admin_command(update, context):
     )
 
 async def error_handler(update, context):
-    # Telegram raises this harmless error when an edit repeats identical text/markup.
+    # Harmless Telegram edit when content is unchanged.
     if isinstance(context.error, BadRequest) and "message is not modified" in str(context.error).lower():
         log.info("Ignored harmless Telegram edit: message is not modified")
+        return
+
+    # Temporary Telegram/network disconnects can happen while polling in the background.
+    # Log them for diagnosis, but do not send noisy bot-error messages to the admin.
+    if isinstance(context.error, NetworkError):
+        log.warning("Temporary Telegram network error: %s", context.error)
+        try:
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO error_logs(error) VALUES(%s)",
+                    (f"Temporary Telegram network error: {str(context.error)[:900]}",)
+                )
+        except Exception:
+            log.exception("Could not save Telegram network error")
         return
 
     log.exception("Unhandled bot error", exc_info=context.error)
